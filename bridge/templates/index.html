@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matrix Bridge - Message Search</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
+
+/* ── Login ── */
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:#16213e;padding:40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.3);width:360px;text-align:center}
+.login-box h2{margin-bottom:24px;font-size:1.4em;color:#e0e0e0}
+.login-box input{width:100%;padding:12px;border:1px solid #0f3460;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:14px;margin-bottom:16px}
+.login-box button{width:100%;padding:12px;background:#0f3460;border:none;border-radius:8px;color:#fff;font-size:14px;cursor:pointer;transition:background .2s}
+.login-box button:hover{background:#1a5276}
+.login-box .error{color:#e74c3c;margin-bottom:12px;font-size:13px;display:none}
+
+/* ── App shell ── */
+.app{display:none;height:100vh;flex-direction:column}
+.header{background:#16213e;padding:12px 24px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #0f3460;flex-shrink:0}
+.header h1{font-size:1.1em;color:#e0e0e0;white-space:nowrap}
+.header .stats{font-size:.8em;color:#888;margin-left:auto;white-space:nowrap}
+
+/* ── Search wrap ── */
+.search-wrap{background:#16213e;border-bottom:1px solid #0f3460;flex-shrink:0}
+
+/* Row 1: main search */
+.search-main{display:flex;gap:8px;padding:10px 16px;align-items:center}
+.search-main input[type="text"]{
+  flex:1;min-width:0;padding:8px 12px;
+  border:1px solid #0f3460;border-radius:6px;
+  background:#1a1a2e;color:#e0e0e0;font-size:14px;
+}
+.search-main input[type="text"]:focus{outline:none;border-color:#2a6496}
+.btn{padding:7px 16px;border:none;border-radius:6px;cursor:pointer;font-size:13px;transition:background .2s;white-space:nowrap}
+.btn-primary{background:#0f3460;color:#fff}.btn-primary:hover{background:#1a5276}
+.btn-ghost{background:#2a2a3e;color:#aaa}.btn-ghost:hover{background:#3a3a4e;color:#e0e0e0}
+.btn-adv{background:#1a2a4a;color:#bbb;display:flex;align-items:center;gap:6px}
+.btn-adv:hover{background:#243650;color:#e0e0e0}
+.btn-adv.active{background:#0f3460;color:#fff}
+.filter-badge{background:#e5c07b;color:#1a1a2e;border-radius:10px;padding:0 6px;font-size:.7em;font-weight:700;line-height:1.6}
+
+/* Row 2: advanced panel */
+.adv-panel{padding:0 16px;overflow:hidden;max-height:0;transition:max-height .25s ease,padding .25s ease}
+.adv-panel.open{max-height:200px;padding:0 16px 12px}
+.adv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.adv-field{display:flex;flex-direction:column;gap:4px}
+.adv-field label{font-size:.72em;color:#888;text-transform:uppercase;letter-spacing:.04em}
+.adv-field select,.adv-field input[type="date"]{
+  padding:7px 10px;border:1px solid #0f3460;border-radius:6px;
+  background:#1a1a2e;color:#e0e0e0;font-size:13px;width:100%;
+}
+.adv-field select:focus,.adv-field input[type="date"]:focus{outline:none;border-color:#2a6496}
+.date-presets{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px}
+.date-presets button{padding:3px 10px;border:1px solid #0f3460;border-radius:4px;background:transparent;color:#aaa;font-size:.75em;cursor:pointer;transition:all .15s}
+.date-presets button:hover{background:#0f3460;color:#fff}
+.date-presets button.active{background:#0f3460;color:#fff;border-color:#1a5276}
+.date-range{display:flex;align-items:center;gap:6px}
+.date-range input{flex:1}
+.date-range span{color:#555;font-size:.85em}
+
+/* Row 3: active filter chips */
+.filter-chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 16px 8px}
+.chip{display:inline-flex;align-items:center;gap:5px;background:#0f3460;color:#ccc;border-radius:14px;padding:3px 10px;font-size:.78em}
+.chip .chip-x{cursor:pointer;color:#888;font-size:1.1em;line-height:1;margin-left:2px}
+.chip .chip-x:hover{color:#fff}
+
+/* ── Layout ── */
+.content{display:flex;flex:1;overflow:hidden}
+.sidebar{width:240px;background:#16213e;border-right:1px solid #0f3460;overflow-y:auto;flex-shrink:0}
+.messages{flex:1;overflow-y:auto;padding:0}
+
+/* ── Sidebar rooms ── */
+.sidebar .room{padding:10px 16px;cursor:pointer;border-bottom:1px solid rgba(15,52,96,.3);transition:background .15s}
+.sidebar .room:hover{background:#1a2a4a}
+.sidebar .room.active{background:#0f3460}
+.sidebar .room .name{font-size:.9em;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sidebar .room .count{font-size:.75em;color:#888;margin-top:2px}
+.sidebar .room .last-msg{font-size:.7em;color:#666;margin-top:2px}
+
+/* ── Result cards ── */
+.result-list{padding:16px 24px}
+.msg{padding:10px 14px;border-radius:8px;margin-bottom:8px;background:#16213e;cursor:pointer;transition:background .15s}
+.msg:hover{background:#1f2f50}
+.msg .meta{display:flex;gap:12px;font-size:.75em;color:#888;margin-bottom:4px;align-items:center;flex-wrap:wrap}
+.msg .meta .sender{color:#5dade2;font-weight:500}
+.msg .meta .room-tag{background:#0f3460;padding:2px 8px;border-radius:4px;color:#aaa;font-size:.7em}
+
+.msg .text{font-size:.9em;line-height:1.5;word-break:break-word}
+.msg .text p:first-child,.tl-text p:first-child{margin-top:0}
+.msg .text p:last-child,.tl-text p:last-child{margin-bottom:0}
+.msg .text p,.tl-text p{margin:.3em 0}
+.msg .text code,.tl-text code{background:#2a2a3e;padding:1px 5px;border-radius:3px;font-size:.85em;color:#e0aaff;font-family:Menlo,Consolas,Monaco,"Courier New",monospace}
+.msg .text pre,.tl-text pre{background:#2a2a3e;padding:8px 10px;border-radius:6px;overflow-x:auto;margin:.4em 0;font-family:Menlo,Consolas,Monaco,"Courier New",monospace;font-size:.85em}
+.msg .text pre code,.tl-text pre code{background:none;padding:0;color:#c8c8d8;font-size:inherit}
+.msg .text a,.tl-text a{color:#5dade2;text-decoration:underline}
+.msg .text strong,.tl-text strong{color:#f0f0f0;font-weight:600}
+.msg .text em,.tl-text em{color:#b0b0c0;font-style:italic}
+.msg .text blockquote,.tl-text blockquote{border-left:3px solid #0f3460;padding-left:10px;color:#aaa;margin:.4em 0;font-style:normal}
+.msg .text ul,.msg .text ol,.tl-text ul,.tl-text ol{padding-left:1.5em;margin:.3em 0}
+.msg .text li,.tl-text li{margin:.15em 0}
+.msg .text h1,.tl-text h1{font-size:1.2em;margin:.4em 0 .2em}
+.msg .text h2,.tl-text h2{font-size:1.1em;margin:.4em 0 .2em}
+.msg .text h3,.tl-text h3{font-size:1.05em;margin:.4em 0 .15em}
+.msg .text h4,.tl-text h4{font-size:1em;margin:.35em 0 .15em}
+.msg .text hr,.tl-text hr{border:none;border-top:1px solid #333;margin:.6em 0}
+.msg .text img,.tl-text img{max-width:100%;border-radius:6px}
+.msg .text table,.tl-text table{border-collapse:collapse;margin:.4em 0;font-size:.9em}
+.msg .text th,.msg .text td,.tl-text th,.tl-text td{border:1px solid #333;padding:4px 8px}
+.msg .text th,.tl-text th{background:#2a2a3e;color:#ccc;font-weight:600}
+.msg .media-tag{display:inline-block;background:#2d1b69;padding:2px 8px;border-radius:4px;color:#b8b8ff;font-size:.75em;margin-top:4px}
+.msg .call-tag{display:inline-block;background:#6b3a2a;padding:2px 8px;border-radius:4px;color:#ffb347;font-size:.75em;margin-top:4px}
+
+/* ── Pagination ── */
+.pagination{display:flex;justify-content:center;gap:8px;padding:16px;align-items:center}
+.pagination button{padding:6px 16px;background:#0f3460;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px}
+.pagination button:disabled{opacity:.4;cursor:default}
+.pagination .page-info{font-size:.85em;color:#888}
+
+/* ── Empty / loading ── */
+.empty{text-align:center;color:#666;padding:60px 20px;font-size:.95em}
+
+/* ── Context bar ── */
+.ctx-bar{display:flex;align-items:center;gap:12px;padding:10px 20px;background:#16213e;border-bottom:1px solid #0f3460;position:sticky;top:0;z-index:10}
+.ctx-bar .back-btn{padding:5px 14px;background:#0f3460;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;transition:background .2s}
+.ctx-bar .back-btn:hover{background:#1a5276}
+.ctx-bar .ctx-room{font-size:.9em;color:#aaa;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ctx-bar .ctx-hint{font-size:.75em;color:#555;margin-left:auto;white-space:nowrap}
+
+.ctx-load{text-align:center;padding:10px 24px}
+.ctx-load button{padding:5px 18px;background:#1a2a4a;border:1px solid #0f3460;border-radius:6px;color:#aaa;cursor:pointer;font-size:12px;transition:all .15s}
+.ctx-load button:hover{background:#0f3460;color:#fff}
+
+.room-loading-top{text-align:center;padding:8px 24px;font-size:.8em;color:#666;cursor:pointer;user-select:none}
+.room-loading-top:hover{color:#5dade2}
+.room-loading-top.loading{color:#5dade2;cursor:default;pointer-events:none}
+
+/* ── Timeline ── */
+.timeline{padding:4px 0 16px}
+.tl-row{display:flex;padding:1px 20px;border-left:3px solid transparent}
+.tl-row:hover{background:rgba(255,255,255,.02)}
+.tl-row.tl-highlight{background:rgba(240,165,0,.1);border-left-color:#f0a500}
+.tl-left{width:46px;flex-shrink:0;display:flex;justify-content:center;padding-top:2px}
+.tl-avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;user-select:none;flex-shrink:0}
+.tl-avatar-gap{width:34px;height:34px;display:flex;align-items:center;justify-content:center}
+.tl-hover-time{font-size:.65em;color:#555;display:none;white-space:nowrap}
+.tl-row:hover .tl-hover-time{display:block}
+.tl-right{flex:1;min-width:0;padding:2px 0 2px 8px}
+.tl-header{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}
+.tl-name{font-size:.9em;font-weight:600}
+.tl-time{font-size:.72em;color:#666}
+.tl-text{font-size:.9em;line-height:1.55;word-break:break-word;color:#d8d8d8}
+.tl-text.empty-text{color:#555;font-style:italic}
+.tl-media{display:inline-flex;align-items:center;gap:6px;margin-top:4px;background:#1e1b3a;padding:5px 10px;border-radius:6px;font-size:.8em;color:#b8b8ff;max-width:100%;overflow:hidden;flex-wrap:wrap}
+.tl-media span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-media img{max-width:360px;max-height:300px;border-radius:4px;cursor:default;display:block;width:100%}
+.tl-media .media-size{color:#888;font-size:.85em;white-space:nowrap}
+.tl-media a.media-dl{color:#b8b8ff;text-decoration:underline;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.tl-media a.media-dl:hover{color:#fff}
+.tl-call{display:inline-flex;align-items:center;gap:6px;margin-top:4px;background:#2a1f0f;padding:5px 10px;border-radius:6px;font-size:.8em;color:#ffb347}
+.tl-direction{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.6em;text-transform:uppercase;margin-left:6px;vertical-align:middle}
+.tl-direction.forward{background:#1b4332;color:#52b788}
+.tl-direction.reply{background:#4a1942;color:#c77dff}
+.tl-date-sep{text-align:center;padding:12px 0 6px;color:#555;font-size:.75em}
+.tl-date-sep::before,.tl-date-sep::after{content:'';display:inline-block;width:80px;height:1px;background:#2a2a3a;vertical-align:middle;margin:0 8px}
+.tl-media.img-preview{display:block;background:none;padding:0;max-width:360px}
+.tl-media.img-preview img{display:block;width:auto;max-width:100%;max-height:300px;border-radius:6px;cursor:zoom-in;transition:opacity .2s}
+.tl-media.img-preview img:hover{opacity:.85}
+#lightbox{display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.88);align-items:center;justify-content:center;cursor:zoom-out}
+#lightbox img{max-width:92vw;max-height:92vh;border-radius:4px;object-fit:contain}
+#lightbox .lb-close{position:absolute;top:16px;right:20px;color:#fff;font-size:28px;cursor:pointer;opacity:.7;line-height:1}
+#lightbox .lb-close:hover{opacity:1}
+
+@media(max-width:768px){
+  .sidebar{width:100%;max-height:180px;border-right:none;border-bottom:1px solid #0f3460}
+  .content{flex-direction:column}
+  .adv-grid{grid-template-columns:1fr 1fr}
+  .tl-row{padding:1px 12px}
+}
+</style>
+</head>
+<body>
+
+<div class="login-wrap" id="loginWrap">
+  <div class="login-box">
+    <h2>Matrix Bridge</h2>
+    <div class="error" id="loginError"></div>
+    <input type="password" id="loginPassword" placeholder="Enter access password" autocomplete="current-password">
+    <button onclick="doLogin()">Login</button>
+  </div>
+</div>
+
+<div class="app" id="app">
+  <div class="header">
+    <h1>Matrix Bridge</h1>
+    <button class="btn btn-primary" id="backfillBtn" onclick="showBackfillDialog()" style="margin-left:8px">Backfill</button>
+    <span class="stats" id="statsBar"></span>
+  </div>
+
+  <!-- ── Search wrap ── -->
+  <div class="search-wrap">
+    <!-- Row 1: basic -->
+    <div class="search-main">
+      <input type="text" id="searchQuery" placeholder="Search messages…"
+             onkeydown="if(event.key==='Enter')doSearch()">
+      <button class="btn btn-primary" onclick="doSearch()">Search</button>
+      <button class="btn btn-ghost" onclick="clearSearch()">Clear</button>
+      <button class="btn btn-adv" id="advBtn" onclick="toggleAdvanced()">
+        Filters <span id="filterBadge" class="filter-badge" style="display:none">0</span>
+        <span id="advArrow">▾</span>
+      </button>
+    </div>
+
+    <!-- Row 2: advanced panel -->
+    <div class="adv-panel" id="advPanel">
+      <div class="adv-grid">
+        <div class="adv-field">
+          <label>Room</label>
+          <select id="searchRoom"><option value="">All Rooms</option></select>
+        </div>
+        <div class="adv-field">
+          <label>Sender</label>
+          <select id="searchSender"><option value="">All Senders</option></select>
+        </div>
+        <div class="adv-field" style="grid-column:span 2">
+          <label>Date range</label>
+          <div class="date-presets">
+            <button id="preset-all"      onclick="setDatePreset('all')" class="active">All time</button>
+            <button id="preset-today"    onclick="setDatePreset('today')">Today</button>
+            <button id="preset-yesterday" onclick="setDatePreset('yesterday')">Yesterday</button>
+            <button id="preset-week"     onclick="setDatePreset('week')">Last 7 days</button>
+            <button id="preset-month"    onclick="setDatePreset('month')">Last 30 days</button>
+            <button id="preset-custom"   onclick="setDatePreset('custom')">Custom</button>
+          </div>
+          <div class="date-range" id="dateCustomRow" style="display:none">
+            <input type="date" id="searchFrom" placeholder="From" oninput="onDateInput()">
+            <span>—</span>
+            <input type="date" id="searchTo"   placeholder="To"   oninput="onDateInput()">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3: active filter chips -->
+    <div class="filter-chips" id="filterChips"></div>
+  </div>
+
+  <div class="content">
+    <div class="sidebar" id="roomList"></div>
+    <div class="messages" id="messageList">
+      <div class="empty">Select a room or search for messages</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let token = '';
+let currentRoom = '';
+let currentPage = 1;
+let searchMode = false;
+let contextMode = false;
+let prevView = null;
+let advOpen = false;
+let activeDatePreset = '';
+const PAGE_SIZE = 50;
+
+let roomMessages = [];
+let roomTotalPages = 0;
+let roomTotalCount = 0;
+let roomHasOlder = false;
+let roomLoading = false;
+
+/* ── Avatar colours ── */
+const AVATAR_COLORS = [
+  '#e06c75','#98c379','#e5c07b','#61afef','#c678dd',
+  '#56b6c2','#d19a66','#be5046','#7ec8e3','#a29bfe',
+];
+function senderColor(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+}
+function initials(dn, s) { return ((dn || s || '?')[0]).toUpperCase(); }
+
+/* ── HTTP ── */
+function api(path, opts = {}) {
+  const headers = opts.headers || {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  return fetch(path, { ...opts, headers }).then(r => {
+    if (r.status === 401) { showLogin(); throw new Error('Unauthorized'); }
+    return r.json();
+  });
+}
+
+/* ── Auth ── */
+function showLogin() {
+  document.getElementById('loginWrap').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+  token = ''; localStorage.removeItem('mb_token');
+}
+function showApp() {
+  document.getElementById('loginWrap').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  loadRooms(); loadStats();
+}
+async function doLogin() {
+  const pw = document.getElementById('loginPassword').value;
+  const errEl = document.getElementById('loginError');
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    const data = await r.json();
+    if (r.ok) { token = data.token; localStorage.setItem('mb_token', token); showApp(); }
+    else { errEl.textContent = data.error || 'Login failed'; errEl.style.display = 'block'; }
+  } catch { errEl.textContent = 'Connection error'; errEl.style.display = 'block'; }
+}
+
+/* ── Stats ── */
+async function loadStats() {
+  try {
+    const s = await api('/api/stats');
+    document.getElementById('statsBar').textContent =
+      `${s.total_messages} messages · ${s.total_rooms} rooms`;
+  } catch {}
+}
+
+/* ── Advanced search panel ── */
+function toggleAdvanced() {
+  advOpen = !advOpen;
+  document.getElementById('advPanel').classList.toggle('open', advOpen);
+  document.getElementById('advBtn').classList.toggle('active', advOpen);
+  document.getElementById('advArrow').textContent = advOpen ? '▴' : '▾';
+}
+
+function localDateStr(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function localDateToUtc(dateStr, endOfDay) {
+  if (!dateStr) return '';
+  var suffix = endOfDay ? 'T23:59:59' : 'T00:00:00';
+  var d = new Date(dateStr + suffix);
+  return d.getUTCFullYear() + '-' +
+    String(d.getUTCMonth()+1).padStart(2,'0') + '-' +
+    String(d.getUTCDate()).padStart(2,'0') + ' ' +
+    String(d.getUTCHours()).padStart(2,'0') + ':' +
+    String(d.getUTCMinutes()).padStart(2,'0') + ':' +
+    String(d.getUTCSeconds()).padStart(2,'0');
+}
+
+function setDatePreset(preset) {
+  if (activeDatePreset === preset && preset !== 'all') preset = 'all';
+
+  activeDatePreset = preset;
+  document.querySelectorAll('.date-presets button').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById('preset-' + preset);
+  if (btn) btn.classList.add('active');
+
+  const customRow = document.getElementById('dateCustomRow');
+  const today = new Date();
+
+  if (preset === 'all') {
+    customRow.style.display = 'none';
+    document.getElementById('searchFrom').value = '';
+    document.getElementById('searchTo').value = '';
+    updateFilterBadge();
+    return;
+  }
+  if (preset === 'custom') {
+    customRow.style.display = 'flex';
+    updateFilterBadge();
+    return;
+  }
+  customRow.style.display = 'none';
+
+  const from = new Date(today), to = new Date(today);
+  if (preset === 'yesterday') {
+    from.setDate(from.getDate() - 1);
+    to.setDate(to.getDate() - 1);
+  } else if (preset === 'week') {
+    from.setDate(from.getDate() - 6);
+  } else if (preset === 'month') {
+    from.setDate(from.getDate() - 29);
+  }
+  document.getElementById('searchFrom').value = localDateStr(from);
+  document.getElementById('searchTo').value = localDateStr(to);
+  updateFilterBadge();
+}
+
+function onDateInput() {
+  // switching to manual input clears the preset highlight
+  activeDatePreset = 'custom';
+  document.querySelectorAll('.date-presets button').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById('preset-custom');
+  if (btn) btn.classList.add('active');
+  document.getElementById('dateCustomRow').style.display = 'flex';
+  updateFilterBadge();
+}
+
+function updateFilterBadge() {
+  const room   = document.getElementById('searchRoom').value;
+  const sender = document.getElementById('searchSender').value;
+  const from   = document.getElementById('searchFrom').value;
+  const to     = document.getElementById('searchTo').value;
+  let count = 0;
+  if (room)   count++;
+  if (sender) count++;
+  if (from || to) count++;
+  const badge = document.getElementById('filterBadge');
+  badge.textContent = count;
+  badge.style.display = count ? 'inline' : 'none';
+}
+
+function renderFilterChips() {
+  const room   = document.getElementById('searchRoom');
+  const sender = document.getElementById('searchSender');
+  const from   = document.getElementById('searchFrom').value;
+  const to     = document.getElementById('searchTo').value;
+  const container = document.getElementById('filterChips');
+  let html = '';
+
+  if (room.value) {
+    const label = room.options[room.selectedIndex]?.text || room.value;
+    html += chip('Room: ' + label, 'clearRoom()');
+  }
+  if (sender.value) {
+    const label = sender.options[sender.selectedIndex]?.text || sender.value;
+    html += chip('Sender: ' + label, 'clearSender()');
+  }
+  if (from || to) {
+    const label = (from || '…') + ' — ' + (to || '…');
+    html += chip(label, 'clearDate()');
+  }
+  container.innerHTML = html;
+}
+function chip(label, clearFn) {
+  return `<span class="chip">${esc(label)}<span class="chip-x" onclick="${clearFn}">✕</span></span>`;
+}
+function clearRoom()   { document.getElementById('searchRoom').value = ''; updateFilterBadge(); renderFilterChips(); doSearch(); }
+function clearSender() { document.getElementById('searchSender').value = ''; updateFilterBadge(); renderFilterChips(); doSearch(); }
+function clearDate() {
+  document.getElementById('searchFrom').value = '';
+  document.getElementById('searchTo').value = '';
+  activeDatePreset = 'all';
+  document.querySelectorAll('.date-presets button').forEach(b => b.classList.remove('active'));
+  const allBtn = document.getElementById('preset-all');
+  if (allBtn) allBtn.classList.add('active');
+  document.getElementById('dateCustomRow').style.display = 'none';
+  updateFilterBadge(); renderFilterChips(); doSearch();
+}
+
+/* ── Rooms ── */
+async function loadRooms() {
+  try {
+    const rooms = await api('/api/rooms');
+    const sel  = document.getElementById('searchRoom');
+    const list = document.getElementById('roomList');
+    const existing = sel.value;
+    sel.innerHTML = '<option value="">All Rooms</option>';
+    list.innerHTML = '';
+    rooms.forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r.room_id;
+      opt.textContent = (r.room_name || r.room_id) + ' (' + r.message_count + ')';
+      sel.appendChild(opt);
+      const div = document.createElement('div');
+      div.className = 'room' + (r.room_id === currentRoom ? ' active' : '');
+      div.dataset.roomId = r.room_id;
+      const lastDate = r.last_message ? new Date(r.last_message).toLocaleDateString() : '';
+      div.innerHTML =
+        `<div class="name">${esc(r.room_name || r.room_id)}</div>` +
+        `<div class="count">${r.message_count} messages</div>` +
+        `<div class="last-msg">${lastDate}</div>`;
+      div.onclick = () => selectRoom(r.room_id);
+      list.appendChild(div);
+    });
+    if (existing) sel.value = existing;
+  } catch {}
+}
+
+async function selectRoom(roomId) {
+  currentRoom = roomId;
+  searchMode = false; contextMode = false; prevView = null;
+  document.querySelectorAll('.sidebar .room').forEach(el =>
+    el.classList.toggle('active', el.dataset.roomId === roomId));
+  document.getElementById('searchQuery').value = '';
+  roomMessages = [];
+  roomHasOlder = false;
+  roomLoading = false;
+  currentPage = 0;
+  roomTotalPages = 0;
+  roomTotalCount = 0;
+  loadRooms();
+  loadRoomSenders(roomId);
+  loadHistory();
+}
+
+async function loadRoomSenders(roomId) {
+  try {
+    const senders = await api('/api/rooms/' + encodeURIComponent(roomId) + '/senders');
+    const sel = document.getElementById('searchSender');
+    sel.innerHTML = '<option value="">All Senders</option>';
+    senders.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.sender;
+      opt.textContent = (s.displayname || s.sender) + ' (' + s.count + ')';
+      sel.appendChild(opt);
+    });
+    updateFilterBadge();
+  } catch {}
+}
+
+async function loadHistory() {
+  const list = document.getElementById('messageList');
+  list.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const firstPage = await api(
+      '/api/history/' + encodeURIComponent(currentRoom) +
+      '?page=1&limit=' + PAGE_SIZE);
+    roomTotalCount = firstPage.total;
+    roomTotalPages = Math.ceil(firstPage.total / PAGE_SIZE) || 1;
+    if (roomTotalPages > 1) {
+      currentPage = roomTotalPages;
+      const data = await api(
+        '/api/history/' + encodeURIComponent(currentRoom) +
+        '?page=' + currentPage + '&limit=' + PAGE_SIZE);
+      roomMessages = data.results || [];
+    } else {
+      currentPage = 1;
+      roomMessages = firstPage.results || [];
+    }
+    roomHasOlder = currentPage > 1;
+    renderRoomTimeline(false);
+  } catch {}
+}
+
+async function loadOlderMessages() {
+  if (roomLoading || !roomHasOlder || currentPage <= 1) return;
+  roomLoading = true;
+  showRoomLoadingTop(true);
+  try {
+    currentPage--;
+    const data = await api(
+      '/api/history/' + encodeURIComponent(currentRoom) +
+      '?page=' + currentPage + '&limit=' + PAGE_SIZE);
+    const older = data.results || [];
+    if (!older.length) { roomHasOlder = false; }
+    else {
+      roomMessages = [...older, ...roomMessages];
+      roomHasOlder = currentPage > 1;
+    }
+    renderRoomTimeline(true);
+  } catch { roomHasOlder = false; }
+  finally { roomLoading = false; }
+}
+
+function showRoomLoadingTop(show) {
+  const el = document.getElementById('messageList').querySelector('.room-loading-top');
+  if (el) {
+    el.className = 'room-loading-top' + (show ? ' loading' : '');
+    el.textContent = show ? 'Loading older messages…' : (roomHasOlder ? '↑ Scroll up to load more' : 'No more messages');
+  }
+}
+
+function onRoomScroll() {
+  const list = document.getElementById('messageList');
+  if (!currentRoom || searchMode || contextMode) return;
+  if (list.scrollTop < 60 && roomHasOlder && !roomLoading) {
+    loadOlderMessages();
+  }
+}
+
+/* ── Search ── */
+async function doSearch() {
+  const q      = document.getElementById('searchQuery').value.trim();
+  const room   = document.getElementById('searchRoom').value;
+  const sender = document.getElementById('searchSender').value;
+  const fromLocal = document.getElementById('searchFrom').value;
+  const toLocal   = document.getElementById('searchTo').value;
+  if (!q && !room && !sender && !fromLocal && !toLocal) return;
+
+  searchMode = true; contextMode = false; prevView = null; currentPage = 1; currentRoom = '';
+  document.querySelectorAll('.sidebar .room').forEach(el => el.classList.remove('active'));
+
+  renderFilterChips();
+  updateFilterBadge();
+
+  const params = new URLSearchParams();
+  if (q)      params.set('q', q);
+  if (room)   params.set('room', room);
+  if (sender) params.set('sender', sender);
+  if (fromLocal) params.set('from', localDateToUtc(fromLocal, false));
+  if (toLocal)   params.set('to', localDateToUtc(toLocal, true));
+  params.set('page', String(currentPage));
+  params.set('limit', String(PAGE_SIZE));
+
+  const list = document.getElementById('messageList');
+  list.innerHTML = '<div class="empty">Searching…</div>';
+  try {
+    const data = await api('/api/search?' + params.toString());
+    renderCards(data, true);
+  } catch {}
+}
+
+function clearSearch() {
+  document.getElementById('searchQuery').value = '';
+  document.getElementById('searchRoom').value = '';
+  document.getElementById('searchSender').value = '';
+  document.getElementById('searchFrom').value = '';
+  document.getElementById('searchTo').value = '';
+  activeDatePreset = 'all';
+  document.querySelectorAll('.date-presets button').forEach(b => b.classList.remove('active'));
+  const allBtn = document.getElementById('preset-all');
+  if (allBtn) allBtn.classList.add('active');
+  document.getElementById('dateCustomRow').style.display = 'none';
+  document.getElementById('filterChips').innerHTML = '';
+  updateFilterBadge();
+  searchMode = false; contextMode = false; prevView = null; currentRoom = ''; currentPage = 1;
+  document.querySelectorAll('.sidebar .room').forEach(el => el.classList.remove('active'));
+  document.getElementById('messageList').innerHTML =
+    '<div class="empty">Select a room or search for messages</div>';
+}
+
+/* ── Card list ── */
+function renderCards(data, showRoom) {
+  const list = document.getElementById('messageList');
+  const msgs = data.results || [];
+  if (!msgs.length) { list.innerHTML = '<div class="empty">No messages found</div>'; return; }
+
+  let html = '<div class="result-list">';
+  msgs.forEach(m => {
+    const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+    let tags = '';
+    if (showRoom)
+      tags += `<span class="room-tag">${esc(m.source_room_name || m.source_room_id)}</span>`;
+
+    let extra = '';
+    if (isImage(m))
+      extra += mediaHtml(m);
+    else if (m.media_filename)
+      extra += `<div class="media-tag">📎 ${esc(m.media_filename)}${m.media_size ? ' (' + formatSize(m.media_size) + ')' : ''}</div>`;
+    if (m.msgtype === 'call_notification')
+      extra += `<div class="call-tag">📞 ${esc(m.call_type || '')} ${esc(m.call_action || '')}${m.call_duration ? ' (' + m.call_duration + 's)' : ''}</div>`;
+    const eid = esc(m.event_id || '');
+    html +=
+      `<div class="msg" onclick="openContext('${eid}')" title="Click to view in room context">` +
+        `<div class="meta">` +
+          `<span class="sender">${esc(m.sender_displayname || m.sender)}</span>` +
+          tags + `<span>${ts}</span>` +
+        `</div>` +
+        `<div class="text">${renderMd(m.text)}</div>` + extra +
+      `</div>`;
+  });
+  const totalPages = Math.ceil(data.total / data.limit);
+  html +=
+    `<div class="pagination">` +
+      `<button ${data.page<=1?'disabled':''} onclick="goPage(${data.page-1})">‹ Prev</button>` +
+      `<span class="page-info">Page ${data.page} / ${totalPages} (${data.total} results)</span>` +
+      `<button ${data.page>=totalPages?'disabled':''} onclick="goPage(${data.page+1})">Next ›</button>` +
+    `</div></div>`;
+  list.innerHTML = html;
+  list.scrollTop = 0;
+}
+
+function renderRoomTimeline(preserveScroll) {
+  const list = document.getElementById('messageList');
+  const msgs = roomMessages;
+  if (!msgs.length) { list.innerHTML = '<div class="empty">No messages found</div>'; return; }
+
+  const prevScrollH = preserveScroll ? list.scrollHeight : 0;
+
+  let html = '';
+  if (roomHasOlder) {
+    html += '<div class="room-loading-top" onclick="loadOlderMessages()">↑ Scroll up to load more</div>';
+  }
+
+  html += '<div class="timeline">';
+
+  let prevSender = null, prevDateStr = null;
+  msgs.forEach(m => {
+    const dateStr = m.timestamp ? new Date(m.timestamp).toLocaleDateString() : '';
+    if (dateStr && dateStr !== prevDateStr) {
+      html += `<div class="tl-date-sep">${esc(dateStr)}</div>`;
+      prevDateStr = dateStr; prevSender = null;
+    }
+    const newGroup = m.sender !== prevSender;
+    const color = senderColor(m.sender || '');
+    const ini = initials(m.sender_displayname, m.sender);
+    const ts = m.timestamp ? new Date(m.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    const eid = esc(m.event_id || '');
+
+    html += `<div class="tl-row" data-eid="${eid}">`;
+    html += `<div class="tl-left">`;
+    if (newGroup) html += `<div class="tl-avatar" style="background:${color}">${esc(ini)}</div>`;
+    else html += `<div class="tl-avatar-gap"><span class="tl-hover-time">${esc(ts)}</span></div>`;
+    html += `</div><div class="tl-right">`;
+    if (newGroup) {
+      html += `<div class="tl-header"><span class="tl-name" style="color:${color}">${esc(m.sender_displayname || m.sender)}</span><span class="tl-time">${esc(ts)}</span></div>`;
+    }
+    if (m.text) html += `<div class="tl-text">${renderMd(m.text)}</div>`;
+    else if (!m.media_filename && m.msgtype !== 'call_notification') html += `<div class="tl-text empty-text">(no text)</div>`;
+    html += mediaHtml(m);
+    if (m.msgtype === 'call_notification')
+      html += `<div class="tl-call">📞 ${esc(m.call_type||'')} ${esc(m.call_action||'')}${m.call_duration?' ('+m.call_duration+'s)':''}</div>`;
+    html += `</div></div>`;
+    prevSender = m.sender;
+  });
+
+  html += '</div>';
+  list.innerHTML = html;
+
+  list.querySelectorAll('.tl-row').forEach(row => {
+    row.addEventListener('click', () => {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+
+  if (preserveScroll) {
+    const newScrollH = list.scrollHeight;
+    list.scrollTop = newScrollH - prevScrollH;
+  } else {
+    list.scrollTop = list.scrollHeight;
+    if (roomHasOlder && list.scrollHeight <= list.clientHeight) {
+      loadOlderMessages();
+    }
+  }
+}
+
+function goPage(p) {
+  currentPage = p;
+  if (searchMode) {
+    const q      = document.getElementById('searchQuery').value.trim();
+    const room   = document.getElementById('searchRoom').value;
+    const sender = document.getElementById('searchSender').value;
+    const fromLocal = document.getElementById('searchFrom').value;
+    const toLocal   = document.getElementById('searchTo').value;
+    const params = new URLSearchParams();
+    if (q)      params.set('q', q);
+    if (room)   params.set('room', room);
+    if (sender) params.set('sender', sender);
+    if (fromLocal) params.set('from', localDateToUtc(fromLocal, false));
+    if (toLocal)   params.set('to', localDateToUtc(toLocal, true));
+    params.set('page', String(p));
+    params.set('limit', String(PAGE_SIZE));
+    api('/api/search?' + params.toString()).then(d => renderCards(d, true)).catch(() => {});
+  }
+}
+
+/* ── Context view ── */
+let ctxMessages = [];
+let ctxRoomId = '';
+let ctxRoomName = '';
+let ctxTargetId = '';
+
+async function openContext(eventId) {
+  if (!eventId) return;
+  if (!contextMode) {
+    prevView = searchMode ? { type: 'search' } : { type: 'room', roomId: currentRoom };
+  }
+  contextMode = true;
+  ctxTargetId = eventId;
+  const list = document.getElementById('messageList');
+  list.innerHTML = '<div class="empty">Loading context…</div>';
+  try {
+    const data = await api('/api/context/' + encodeURIComponent(eventId) + '?before=25&after=25');
+    ctxMessages = [...data.before, { ...data.target, _target: true }, ...data.after];
+    ctxRoomId   = data.room_id;
+    ctxRoomName = data.room_name;
+    renderContext();
+    scrollToHighlight();
+  } catch { list.innerHTML = '<div class="empty">Failed to load context</div>'; }
+}
+
+function backFromContext() {
+  contextMode = false; ctxMessages = [];
+  if (prevView && prevView.type === 'search') { prevView = null; doSearch(); }
+  else if (prevView && prevView.type === 'room') { const r = prevView.roomId; prevView = null; selectRoom(r); }
+  else { prevView = null; document.getElementById('messageList').innerHTML = '<div class="empty">Select a room or search for messages</div>'; }
+}
+
+async function loadOlderCtx() {
+  if (!ctxMessages.length) return;
+  const oldest = ctxMessages[0];
+  if (!oldest?.event_id) return;
+  try {
+    const data = await api('/api/context/' + encodeURIComponent(oldest.event_id) + '?before=25&after=0');
+    if (data.before?.length) { ctxMessages = [...data.before, ...ctxMessages]; renderContext(true); }
+  } catch {}
+}
+
+async function loadNewerCtx() {
+  if (!ctxMessages.length) return;
+  const newest = ctxMessages[ctxMessages.length - 1];
+  if (!newest?.event_id) return;
+  try {
+    const data = await api('/api/context/' + encodeURIComponent(newest.event_id) + '?before=0&after=25');
+    if (data.after?.length) { ctxMessages = [...ctxMessages, ...data.after]; renderContext(true); }
+  } catch {}
+}
+
+function renderContext(preserveScroll = false) {
+  const list = document.getElementById('messageList');
+  const prevTop = preserveScroll ? list.scrollTop : 0;
+  const prevH   = preserveScroll ? list.scrollHeight : 0;
+
+  let html =
+    `<div class="ctx-bar">` +
+      `<button class="back-btn" onclick="backFromContext()">← Back</button>` +
+      `<span class="ctx-room">${esc(ctxRoomName || ctxRoomId)}</span>` +
+      `<span class="ctx-hint">Click a message to re-center</span>` +
+    `</div>` +
+    `<div class="ctx-load"><button onclick="loadOlderCtx()">↑ Load older</button></div>` +
+    `<div class="timeline">`;
+
+  let prevSender = null, prevDateStr = null;
+  ctxMessages.forEach(m => {
+    const dateStr = m.timestamp ? new Date(m.timestamp).toLocaleDateString() : '';
+    if (dateStr && dateStr !== prevDateStr) {
+      html += `<div class="tl-date-sep">${esc(dateStr)}</div>`;
+      prevDateStr = dateStr; prevSender = null;
+    }
+    const newGroup = m.sender !== prevSender;
+    const color = senderColor(m.sender || '');
+    const ini   = initials(m.sender_displayname, m.sender);
+    const ts    = m.timestamp ? new Date(m.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    const tsLong= m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+    const isTarget = m.event_id === ctxTargetId;
+    const eid   = esc(m.event_id || '');
+
+    html += `<div class="${'tl-row' + (isTarget ? ' tl-highlight' : '')}" onclick="openContext('${eid}')" title="${esc(tsLong)}">`;
+    html += `<div class="tl-left">`;
+    if (newGroup) html += `<div class="tl-avatar" style="background:${color}">${esc(ini)}</div>`;
+    else html += `<div class="tl-avatar-gap"><span class="tl-hover-time">${esc(ts)}</span></div>`;
+    html += `</div><div class="tl-right">`;
+    if (newGroup) {
+      html += `<div class="tl-header"><span class="tl-name" style="color:${color}">${esc(m.sender_displayname || m.sender)}</span><span class="tl-time">${esc(ts)}</span></div>`;
+    }
+    if (m.text) html += `<div class="tl-text">${renderMd(m.text)}</div>`;
+    else if (!m.media_filename && m.msgtype !== 'call_notification') html += `<div class="tl-text empty-text">(no text)</div>`;
+    html += mediaHtml(m);
+    if (m.msgtype === 'call_notification')
+      html += `<div class="tl-call">📞 ${esc(m.call_type||'')} ${esc(m.call_action||'')}${m.call_duration?' ('+m.call_duration+'s)':''}</div>`;
+    html += `</div></div>`;
+    prevSender = m.sender;
+  });
+
+  html += `</div><div class="ctx-load"><button onclick="loadNewerCtx()">↓ Load newer</button></div>`;
+  list.innerHTML = html;
+  if (preserveScroll) list.scrollTop = prevTop + (list.scrollHeight - prevH);
+}
+
+function scrollToHighlight() {
+  const el = document.getElementById('messageList').querySelector('.tl-highlight');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+/* ── Helpers ── */
+function esc(s) {
+  if (s == null) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML.replace(/'/g, '&#39;').replace(/`/g, '&#96;');
+}
+function formatSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
+}
+
+/* ── Init ── */
+(function init() {
+  const saved = localStorage.getItem('mb_token');
+  if (saved) {
+    token = saved;
+    fetch('/api/stats', { headers: { Authorization: 'Bearer ' + token } })
+      .then(r => { if (r.ok) showApp(); else showLogin(); })
+      .catch(showLogin);
+  }
+  document.getElementById('loginPassword').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+  document.getElementById('messageList').addEventListener('scroll', onRoomScroll);
+})();
+</script>
+<script src="/static/marked.min.js"></script>
+<script>
+marked.setOptions({ breaks: true, gfm: true, html: false });
+function renderMd(text) {
+  if (!text) return '';
+  return marked.parse(text);
+}
+function mediaUrl(eid) {
+  return '/api/media/' + encodeURIComponent(eid) + (token ? '?token=' + encodeURIComponent(token) : '');
+}
+function isImage(m) {
+  return m.media_filename && m.media_local_path && (m.msgtype === 'm.image' || (m.media_mimetype && m.media_mimetype.startsWith('image/')));
+}
+function mediaHtml(m) {
+  if (!m.media_filename) return '';
+  if (isImage(m))
+    return `<div class="tl-media img-preview"><img src="${mediaUrl(m.event_id)}" alt="${esc(m.media_filename)}" loading="lazy" onclick="openLightbox(this.src)">${m.media_size ? `<span class="media-size">${formatSize(m.media_size)}</span>` : ''}</div>`;
+  const sizeHtml = m.media_size ? `<span class="media-size">${formatSize(m.media_size)}</span>` : '';
+  if (m.media_local_path)
+    return `<div class="tl-media"><span>📎</span><a class="media-dl" href="${mediaUrl(m.event_id)}" download="${esc(m.media_filename)}" onclick="event.stopPropagation()">${esc(m.media_filename)}</a>${sizeHtml}</div>`;
+  return `<div class="tl-media"><span>📎</span><span>${esc(m.media_filename)}</span>${sizeHtml}</div>`;
+}
+function openLightbox(src) {
+  event.stopPropagation();
+  const lb = document.getElementById('lightbox');
+  lb.querySelector('img').src = src;
+  lb.style.display = 'flex';
+}
+function closeLightbox() {
+  document.getElementById('lightbox').style.display = 'none';
+}
+
+/* ── Backfill ── */
+let bfPollTimer = null;
+function showBackfillDialog() {
+  document.getElementById('backfillOverlay').style.display = 'flex';
+  document.getElementById('backfillForm').style.display = 'block';
+  document.getElementById('backfillProgress').style.display = 'none';
+  document.getElementById('backfillResult').style.display = 'none';
+  document.getElementById('bfClear').checked = false;
+  document.getElementById('bfClearWarn').style.display = 'none';
+  document.getElementById('bfClearConfirm').checked = false;
+  api('/api/backfill/status').then(s => {
+    if (s.running) {
+      document.getElementById('backfillForm').style.display = 'none';
+      document.getElementById('backfillProgress').style.display = 'block';
+      pollBackfill();
+    }
+  }).catch(() => {});
+}
+function hideBackfillDialog() {
+  document.getElementById('backfillOverlay').style.display = 'none';
+  if (bfPollTimer) { clearInterval(bfPollTimer); bfPollTimer = null; }
+}
+document.getElementById('bfClear').addEventListener('change', function() {
+  document.getElementById('bfClearWarn').style.display = this.checked ? 'block' : 'none';
+  if (!this.checked) document.getElementById('bfClearConfirm').checked = false;
+});
+async function startBackfill() {
+  const days = parseInt(document.getElementById('bfDays').value) || 0;
+  const noMedia = !document.getElementById('bfMedia').checked;
+  const clearBefore = document.getElementById('bfClear').checked;
+  if (clearBefore && !document.getElementById('bfClearConfirm').checked) {
+    alert('Please confirm clearing data before proceeding.');
+    return;
+  }
+  document.getElementById('bfStartBtn').disabled = true;
+  try {
+    const r = await api('/api/backfill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days, no_media: noMedia, clear_before: clearBefore }),
+    });
+    if (r.error) { alert(r.error); document.getElementById('bfStartBtn').disabled = false; return; }
+    document.getElementById('backfillForm').style.display = 'none';
+    document.getElementById('backfillProgress').style.display = 'block';
+    pollBackfill();
+  } catch (e) { alert('Failed to start backfill'); document.getElementById('bfStartBtn').disabled = false; }
+}
+function pollBackfill() {
+  if (bfPollTimer) clearInterval(bfPollTimer);
+  bfPollTimer = setInterval(async () => {
+    try {
+      const s = await api('/api/backfill/status');
+      const total = s.total_rooms || 1;
+      const pct = Math.round((s.processed_rooms / total) * 100);
+      document.getElementById('bfProgressPct').textContent = pct + '%';
+      document.getElementById('bfProgressBar').style.width = pct + '%';
+      document.getElementById('bfStatusText').textContent =
+        s.running ? `Processing room ${s.processed_rooms}/${s.total_rooms}` : 'Finishing...';
+      let detail = '';
+      if (s.current_room) detail += 'Current: ' + esc(s.current_room) + '<br>';
+      if (s.saved) detail += 'Saved: ' + s.saved + ' messages<br>';
+      document.getElementById('bfDetail').innerHTML = detail;
+      if (!s.running && s.done) {
+        clearInterval(bfPollTimer); bfPollTimer = null;
+        document.getElementById('backfillProgress').style.display = 'none';
+        document.getElementById('backfillResult').style.display = 'block';
+        if (s.error) {
+          document.getElementById('bfResultMsg').innerHTML =
+            '<span style="color:#e74c3c">Error: ' + esc(s.error) + '</span>';
+        } else {
+          document.getElementById('bfResultMsg').innerHTML =
+            '<span style="color:#52b788">Backfill complete!</span><br>' +
+            (s.saved ? s.saved + ' messages saved across ' + s.total_rooms + ' rooms.' : '');
+        }
+        loadRooms(); loadStats();
+      }
+    } catch {}
+  }, 2000);
+}
+</script>
+<!-- Backfill dialog -->
+<div id="backfillOverlay" style="display:none;position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
+  <div style="background:#16213e;padding:28px 32px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.4);width:420px;max-width:92vw">
+    <h3 style="margin:0 0 20px;color:#e0e0e0;font-size:1.15em">Backfill History</h3>
+    <div id="backfillForm">
+      <div style="margin-bottom:14px">
+        <label style="display:block;font-size:.8em;color:#888;margin-bottom:4px">Days of history (0 = all)</label>
+        <input type="number" id="bfDays" value="0" min="0" style="width:100%;padding:8px 12px;border:1px solid #0f3460;border-radius:6px;background:#1a1a2e;color:#e0e0e0;font-size:14px">
+      </div>
+      <div style="margin-bottom:14px;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="bfMedia" checked style="accent-color:#0f3460">
+        <label for="bfMedia" style="font-size:.9em;color:#ccc">Download media files</label>
+      </div>
+      <div style="margin-bottom:18px;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="bfClear" style="accent-color:#0f3460">
+        <label for="bfClear" style="font-size:.9em;color:#e74c3c">Clear database &amp; media before backfill</label>
+      </div>
+      <div id="bfClearWarn" style="display:none;margin-bottom:14px;padding:8px 12px;background:#3a1a1a;border:1px solid #e74c3c;border-radius:6px;font-size:.82em;color:#e74c3c">
+        Warning: This will delete all existing messages and media files!
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="bfClearConfirm" style="accent-color:#e74c3c">
+          <label for="bfClearConfirm" style="color:#e74c3c">I understand, proceed</label>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn btn-ghost" onclick="hideBackfillDialog()">Cancel</button>
+        <button class="btn btn-primary" id="bfStartBtn" onclick="startBackfill()">Start</button>
+      </div>
+    </div>
+    <div id="backfillProgress" style="display:none">
+      <div style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;font-size:.82em;color:#888;margin-bottom:4px">
+          <span id="bfStatusText">Starting...</span>
+          <span id="bfProgressPct">0%</span>
+        </div>
+        <div style="background:#1a1a2e;border-radius:6px;height:8px;overflow:hidden">
+          <div id="bfProgressBar" style="background:#0f3460;height:100%;width:0%;transition:width .3s;border-radius:6px"></div>
+        </div>
+      </div>
+      <div id="bfDetail" style="font-size:.82em;color:#aaa;line-height:1.6"></div>
+    </div>
+    <div id="backfillResult" style="display:none">
+      <div id="bfResultMsg" style="font-size:.92em;line-height:1.6;margin-bottom:14px"></div>
+      <div style="text-align:right">
+        <button class="btn btn-primary" onclick="hideBackfillDialog()">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="lightbox" onclick="closeLightbox()">
+  <span class="lb-close">&times;</span>
+  <img src="" alt="">
+</div>
+</body>
+</html>

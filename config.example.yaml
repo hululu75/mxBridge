@@ -1,0 +1,70 @@
+# Matrix Bridge / Backup configuration
+#
+# Bridge mode (default): forward messages from source to target server.
+#   Requires both "source" and "target" sections.
+#
+# Backup mode: save all messages + media to local storage without forwarding.
+#   Remove the "target" section entirely and enable message_store.
+#   The bot joins rooms on a single server and records everything it sees.
+
+logging:
+  level: INFO
+  file: ""                   # Log file path (empty = stdout only)
+  max_bytes: 10485760        # Log rotation size in bytes (default 10MB)
+  backup_count: 3            # Number of rotated log files to keep
+
+source:
+  homeserver: "https://matrix-a.example.com"
+  user_id: "@bridge-bot:a.example.com"
+  access_token: ""
+  password: ""
+  device_id: ""                # Leave empty to let the server assign one (auto-saved back)
+  store_path: "./store/source"
+  handle_encrypted: true
+  media_max_size: 52428800
+  key_import_file: ""
+  key_import_passphrase: ""
+
+target:
+  homeserver: "https://matrix-b.example.com"
+  user_id: "@bridge-bot:b.example.com"
+  access_token: ""
+  password: ""
+  device_id: ""                # Leave empty to let the server assign one (auto-saved back)
+  store_path: "./store/target"
+  handle_encrypted: true
+  target_room: "!your-aggregation-room:b.example.com"
+  key_import_file: ""
+  key_import_passphrase: ""
+
+bridge:
+  command_prefix: "!send"
+  message_format: "[{room_name}] {sender}: {text}"
+  state_path: "state.json"
+
+  media:
+    enabled: true
+
+  call_notifications:
+    enabled: true
+
+  message_store:
+    enabled: false            # Set to true to persist all messages to SQLite
+    path: "messages.db"
+    media_dir: "./media"      # Local directory to save downloaded media files (empty = don't save files)
+
+  web:
+    enabled: false            # Set to true to enable the web search interface (requires message_store)
+    host: "0.0.0.0"
+    port: 8080
+    password: ""              # Required for non-localhost access; leave empty to bind 127.0.0.1 only
+    trusted_proxy: false      # Set to true when behind a reverse proxy (reads real IP from X-Forwarded-For)
+    # WARNING: This interface has no TLS support. For remote access, place it behind a
+    # TLS-terminating reverse proxy (e.g. Nginx, Caddy). Never expose it directly to the internet.
+
+  # Commands available in the target room:
+  #   !login   - Connect source and resume message forwarding
+  #   !logout  - Disconnect source and pause message forwarding
+  #   !pause   - Pause forwarding (source stays connected, messages still saved)
+  #   !resume  - Resume forwarding after pause
+  # Bridge starts with only target connected; use !login to connect source.
