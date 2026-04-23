@@ -95,7 +95,7 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _decrypt_config_if_needed(config: dict) -> dict:
+def _decrypt_config_if_needed(config: dict) -> tuple[dict, str]:
     needs_key = False
     for section_key in ("source", "target"):
         section = config.get(section_key)
@@ -107,10 +107,13 @@ def _decrypt_config_if_needed(config: dict) -> dict:
                 break
         if needs_key:
             break
-    if not needs_key:
-        return config
-    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password to decrypt config: ")
-    return decrypt_config(config, master_key)
+    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password: ")
+    if not master_key:
+        logger.error("Master password is required")
+        sys.exit(1)
+    if needs_key:
+        config = decrypt_config(config, master_key)
+    return config, master_key
 
 
 def _get_room_name(room) -> str:
@@ -496,7 +499,7 @@ async def main_async() -> None:
         logger.error("Config file not found: %s", args.config)
         sys.exit(1)
 
-    config = _decrypt_config_if_needed(config)
+    config, master_key = _decrypt_config_if_needed(config)
 
     source_config = config.get("source", {})
     if not source_config.get("homeserver"):
@@ -510,7 +513,11 @@ async def main_async() -> None:
     if not store_cfg.get("enabled", False) and not args.dry_run:
         logger.info("message_store not enabled in config, but continuing for backfill")
 
-    store = MessageStore(store_path, media_dir=store_cfg.get("media_dir", "") if not args.dry_run else "")
+    store = MessageStore(
+        store_path,
+        media_dir=store_cfg.get("media_dir", "") if not args.dry_run else "",
+        db_password=master_key,
+    )
     logger.info("MessageStore opened: %s", store_path)
 
     state = StateManager(bridge_config.get("state_path", "state.json"))

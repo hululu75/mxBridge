@@ -80,7 +80,7 @@ async def _matrix_login(homeserver: str, user_id: str, password: str, device_id:
         await client.close()
 
 
-async def setup_credentials(config: dict, config_path: str) -> dict:
+async def setup_credentials(config: dict, config_path: str, master_password: str = "") -> dict:
     """
     For backends missing access_token: login with password, encrypt the token
     with a master password, write back to config file, and return a runtime
@@ -96,12 +96,13 @@ async def setup_credentials(config: dict, config_path: str) -> dict:
     if not sections_needing_setup:
         return config
 
-    master_password = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Set master password for config encryption: ")
     if not master_password:
-        raise ValueError("Master password is required (set MXBIRDGE_MASTER_KEY env or enter interactively)")
-    confirm = master_password if os.environ.get("MXBIRDGE_MASTER_KEY") else getpass.getpass("Confirm master password: ")
-    if master_password != confirm:
-        raise ValueError("Master passwords do not match")
+        master_password = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Set master password for config encryption: ")
+        if not master_password:
+            raise ValueError("Master password is required (set MXBIRDGE_MASTER_KEY env or enter interactively)")
+        confirm = master_password if os.environ.get("MXBIRDGE_MASTER_KEY") else getpass.getpass("Confirm master password: ")
+        if master_password != confirm:
+            raise ValueError("Master passwords do not match")
 
     runtime_config = copy.deepcopy(config)
     save_config = copy.deepcopy(config)
@@ -167,6 +168,61 @@ def _config_needs_key(config: dict) -> bool:
     return False
 
 
+def _check_config_writable(config_path: str) -> None:
+    if not os.path.isfile(config_path):
+        return
+    if not os.access(config_path, os.W_OK):
+        logger.error(
+            "Config file %s is not writable. "
+            "The bridge needs write access to encrypt plaintext credentials.",
+            config_path,
+        )
+        sys.exit(1)
+
+
+def _has_plaintext_credentials(config: dict) -> bool:
+    sensitive_fields = ("access_token", "password", "key_import_passphrase")
+    for section_key in ("source", "target"):
+        section = config.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        for field in sensitive_fields:
+            value = section.get(field, "")
+            if value and not is_encrypted(value):
+                return True
+    return False
+
+
+def _auto_encrypt_plaintext_fields(
+    config: dict, master_key: str, config_path: str,
+) -> dict:
+    sensitive_fields = ("access_token", "password", "key_import_passphrase")
+    changed = False
+    save_config = copy.deepcopy(config)
+
+    for section_key in ("source", "target"):
+        section = save_config.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        for field in sensitive_fields:
+            value = section.get(field, "")
+            if value and not is_encrypted(value):
+                section[field] = encrypt(value, master_key)
+                changed = True
+
+    if not changed:
+        return config
+
+    tmp_path = config_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        yaml.dump(save_config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    os.replace(tmp_path, config_path)
+    os.chmod(config_path, stat.S_IRUSR | stat.S_IWUSR)
+    logger.info("Plaintext credentials encrypted and saved to %s", config_path)
+
+    return save_config
+
+
 async def main() -> None:
     config_path = os.environ.get("MXBRIDGE_CONFIG", "config.yaml")
     if len(sys.argv) > 1:
@@ -186,19 +242,30 @@ async def main() -> None:
 
     setup_logging(config)
 
-    if _config_needs_key(config):
+    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass(
+        "Enter master password: "
+    )
+    if not master_key:
+        logger.error("Master password is required (set MXBIRDGE_MASTER_KEY env or enter interactively)")
+        sys.exit(1)
+
+    had_encrypted_fields = _config_needs_key(config)
+
+    if had_encrypted_fields:
         try:
-            master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password to decrypt config: ")
-            if not master_key:
-                raise ValueError("Master password is required (set MXBIRDGE_MASTER_KEY env or enter interactively)")
             config = decrypt_config(config, master_key)
             logger.info("Config decrypted successfully")
         except ValueError as e:
             logger.error("Config decryption failed: %s", e)
             sys.exit(1)
 
+    if not had_encrypted_fields and _has_plaintext_credentials(config):
+        _check_config_writable(config_path)
+        config = _auto_encrypt_plaintext_fields(config, master_key, config_path)
+        config = decrypt_config(config, master_key)
+
     try:
-        config = await setup_credentials(config, config_path)
+        config = await setup_credentials(config, config_path, master_password=master_key)
     except (ValueError, RuntimeError) as e:
         logger.error("Credential setup failed: %s", e)
         sys.exit(1)
@@ -223,7 +290,11 @@ async def main() -> None:
     store_cfg = bridge_config.get("message_store", {})
     if store_cfg.get("enabled", False):
         store_path = store_cfg.get("path", "messages.db")
-        message_store = MessageStore(store_path, media_dir=store_cfg.get("media_dir", ""))
+        message_store = MessageStore(
+            store_path,
+            media_dir=store_cfg.get("media_dir", ""),
+            db_password=master_key,
+        )
         logger.info("Message store initialized: %s", store_path)
 
     if is_backup_mode:
