@@ -26,7 +26,7 @@ cp config.example.yaml config/config.yaml
 # Set master key for non-interactive startup (if using encrypted config)
 export MASTER_KEY="your-master-password"
 
-docker compose up -d
+docker compose -f docker/docker-compose.yaml up -d
 ```
 
 ### Manual
@@ -115,8 +115,8 @@ bridge:
 | Foreground | `python3 main.py` |
 | Custom config | `python3 main.py /path/to/config.yaml` |
 | Background | `nohup python3 main.py > bridge.log 2>&1 &` |
-| Docker | `docker compose up -d` |
-| systemd | See [USERGUIDE.md](USERGUIDE.md#with-systemd) |
+| Docker | `docker compose -f docker/docker-compose.yaml up -d` |
+| systemd | See [USERGUIDE.md](docs/USERGUIDE.md#with-systemd) |
 
 ### Environment variables
 
@@ -168,27 +168,27 @@ Or use your Matrix client's reply feature directly on a forwarded message.
 
 ```bash
 # Import last 30 days of history
-python3 backfill.py
+python3 scripts/backfill.py
 
 # Import specific rooms, last 7 days
-python3 backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
+python3 scripts/backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
 
 # Repair corrupted media files
-python3 repair_media.py
+python3 scripts/repair_media.py
 
 # Encrypt/decrypt config values
-python3 encrypt_tool.py encrypt
-python3 encrypt_tool.py decrypt
+python3 scripts/encrypt_tool.py encrypt
+python3 scripts/encrypt_tool.py decrypt
 ```
 
 ## Documentation
 
 | File | Description |
 |------|-------------|
-| [USERGUIDE.md](USERGUIDE.md) | Full user guide with troubleshooting |
-| [USERGUIDE_CN.md](USERGUIDE_CN.md) | 用户指南（中文） |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Architecture and code documentation |
-| [ARCHITECTURE_CN.md](ARCHITECTURE_CN.md) | 架构文档（中文） |
+| [USERGUIDE.md](docs/USERGUIDE.md) | Full user guide with troubleshooting |
+| [USERGUIDE_CN.md](docs/USERGUIDE_CN.md) | 用户指南（中文） |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Architecture and code documentation |
+| [ARCHITECTURE_CN.md](docs/ARCHITECTURE_CN.md) | 架构文档（中文） |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
 
 ## Important Notes

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.git/
+.gitignore
+docs/
+store/
+*.md
+!README.md
+config.yaml
+*.db
+*.tmp
+media/

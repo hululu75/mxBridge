@@ -1,11 +1,13 @@
 services:
   matrix-bridge:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: matrix-bridge
     restart: unless-stopped
     environment:
       - MXBIRDGE_MASTER_KEY=${MASTER_KEY:-}
     volumes:
-      - ./config:/app/config:ro
-      - ./store:/app/store
-      - ./media:/app/media
+      - ../config:/app/config:ro
+      - ../store:/app/store
+      - ../media:/app/media

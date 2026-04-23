@@ -60,9 +60,18 @@ matrix/
 ├── main.py                       # 入口：配置加载、加密、信号处理、启动
 ├── config.example.yaml           # 配置模板
 ├── requirements.txt              # Python 依赖
-├── encrypt_tool.py               # CLI：加密/解密配置值
-├── backfill.py                   # CLI：导入历史消息到 MessageStore
-├── repair_media.py               # CLI：修复损坏的加密媒体文件
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── ARCHITECTURE_CN.md
+│   ├── USERGUIDE.md
+│   └── USERGUIDE_CN.md
+├── docker/
+│   ├── Dockerfile
+│   └── docker-compose.yaml
+├── scripts/
+│   ├── backfill.py               # CLI：导入历史消息到 MessageStore
+│   ├── repair_media.py           # CLI：修复损坏的加密媒体文件
+│   └── encrypt_tool.py           # CLI：加密/解密配置值
 ├── bridge/
 │   ├── __init__.py
 │   ├── models.py                 # BridgeMessage 数据类 — 统一的跨后端消息模型
@@ -622,7 +631,7 @@ class BridgeCore:
 #### 集成点
 
 - `bridge/core.py`：从异步线程调用 `save_message()`、`upsert_user_alias()`、`upsert_room_alias()`、`update_message_text()`、`delete_message()`
-- `backfill.py`：批量导入历史消息
+- `scripts/backfill.py`：批量导入历史消息
 - `bridge/web.py`：通过 HTTP API 提供存储的消息
 
 ---
@@ -720,7 +729,7 @@ class BridgeCore:
 
 ### 3.12 CLI 工具
 
-#### `backfill.py` — 历史消息导入
+#### `scripts/backfill.py` — 历史消息导入
 
 连接到源 Matrix 服务器，批量导入历史房间消息到 MessageStore。
 
@@ -742,7 +751,7 @@ class BridgeCore:
 --log-level   设置日志级别
 ```
 
-#### `repair_media.py` — 媒体修复工具
+#### `scripts/repair_media.py` — 媒体修复工具
 
 扫描本地保存的媒体文件以检测损坏（未解密就保存的密文），重新下载并解密。
 
@@ -753,13 +762,13 @@ class BridgeCore:
 - 路径遍历保护
 - `--dry-run` 模式
 
-#### `encrypt_tool.py` — 配置加密工具
+#### `scripts/encrypt_tool.py` — 配置加密工具
 
 用于加密/解密单个配置值的交互式 CLI：
 
 ```
-python encrypt_tool.py encrypt    # 加密一个值
-python encrypt_tool.py decrypt    # 解密一个值
+python scripts/encrypt_tool.py encrypt    # 加密一个值
+python scripts/encrypt_tool.py decrypt    # 解密一个值
 ```
 
 ---

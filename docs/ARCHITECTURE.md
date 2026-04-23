@@ -62,9 +62,18 @@ matrix/
 ├── main.py                       # Entry point: config loading, encryption, signal handling, startup
 ├── config.example.yaml           # Configuration template
 ├── requirements.txt              # Python dependencies
-├── encrypt_tool.py               # CLI: encrypt/decrypt config values
-├── backfill.py                   # CLI: import historical messages into MessageStore
-├── repair_media.py               # CLI: repair corrupted encrypted media files
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── ARCHITECTURE_CN.md
+│   ├── USERGUIDE.md
+│   └── USERGUIDE_CN.md
+├── docker/
+│   ├── Dockerfile
+│   └── docker-compose.yaml
+├── scripts/
+│   ├── backfill.py               # CLI: import historical messages into MessageStore
+│   ├── repair_media.py           # CLI: repair corrupted encrypted media files
+│   └── encrypt_tool.py           # CLI: encrypt/decrypt config values
 ├── bridge/
 │   ├── __init__.py
 │   ├── models.py                 # BridgeMessage dataclass — unified cross-backend message model
@@ -624,7 +633,7 @@ Peewee ORM-based message store with full-text search, alias management, and medi
 #### Integration Points
 
 - `bridge/core.py`: Calls `save_message()`, `upsert_user_alias()`, `upsert_room_alias()`, `update_message_text()`, `delete_message()` from async threads
-- `backfill.py`: Bulk imports historical messages
+- `scripts/backfill.py`: Bulk imports historical messages
 - `bridge/web.py`: Serves stored messages via HTTP API
 
 ---
@@ -723,7 +732,7 @@ When `access_token` is missing from a backend section, `setup_credentials()`:
 
 ### 3.12 CLI Tools
 
-#### `backfill.py` — Historical Message Import
+#### `scripts/backfill.py` — Historical Message Import
 
 Connects to the source Matrix server and bulk-imports historical room messages into the MessageStore.
 
@@ -745,7 +754,7 @@ Connects to the source Matrix server and bulk-imports historical room messages i
 --log-level   Set log level
 ```
 
-#### `repair_media.py` — Media Repair Tool
+#### `scripts/repair_media.py` — Media Repair Tool
 
 Scans locally saved media files for corruption (encrypted ciphertext saved without decryption) and re-downloads + re-decrypts them.
 
@@ -756,13 +765,13 @@ Scans locally saved media files for corruption (encrypted ciphertext saved witho
 - Path traversal protection
 - `--dry-run` mode
 
-#### `encrypt_tool.py` — Config Encryption Utility
+#### `scripts/encrypt_tool.py` — Config Encryption Utility
 
 Interactive CLI for encrypting/decrypting individual config values:
 
 ```
-python encrypt_tool.py encrypt    # Encrypt a value
-python encrypt_tool.py decrypt    # Decrypt a value
+python scripts/encrypt_tool.py encrypt    # Encrypt a value
+python scripts/encrypt_tool.py decrypt    # Decrypt a value
 ```
 
 ---

@@ -152,7 +152,7 @@ bridge:
 Use the encryption tool to encrypt your access tokens and passwords:
 
 ```bash
-python3 encrypt_tool.py encrypt
+python3 scripts/encrypt_tool.py encrypt
 ```
 
 This will prompt for a value and a master password, then output an `enc:...` string. Replace the plaintext value in `config.yaml`:
@@ -373,36 +373,38 @@ Set `trusted_proxy: true` in the web config to read the real client IP from `X-F
 
 ```bash
 # Import last 30 days from all rooms
-python3 backfill.py
+python3 scripts/backfill.py
+```
 
 # Import specific rooms, last 7 days
-python3 backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
+python3 scripts/backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
 
 # Dry run (show what would be imported)
-python3 backfill.py --dry-run
+python3 scripts/backfill.py --dry-run
 
 # Skip media downloads
-python3 backfill.py --no-media
+python3 scripts/backfill.py --no-media
 
 # Limit to 1000 messages
-python3 backfill.py --limit 1000
+python3 scripts/backfill.py --limit 1000
 ```
 
 ### Repair media — fix corrupted files
 
 ```bash
 # Check and repair corrupted media files
-python3 repair_media.py
+python3 scripts/repair_media.py
+```
 
 # Dry run (show what would be repaired)
-python3 repair_media.py --dry-run
+python3 scripts/repair_media.py --dry-run
 ```
 
 ### Encrypt tool — encrypt/decrypt config values
 
 ```bash
-python3 encrypt_tool.py encrypt    # Encrypt a value
-python3 encrypt_tool.py decrypt    # Decrypt a value
+python3 scripts/encrypt_tool.py encrypt    # Encrypt a value
+python3 scripts/encrypt_tool.py decrypt    # Decrypt a value
 ```
 
 ## Key import
@@ -476,7 +478,7 @@ logging:
 - Ensure you are entering the correct master password
 - If the password is lost, you will need to re-encrypt your credentials:
   1. Obtain new access tokens
-  2. Use `encrypt_tool.py encrypt` with a new master password
+  2. Use `scripts/encrypt_tool.py encrypt` with a new master password
   3. Update `config.yaml` with the new encrypted values
 
 ## Important notes

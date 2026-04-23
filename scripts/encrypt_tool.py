@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import getpass
+import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import getpass
 
 from bridge.crypto import decrypt, encrypt, is_encrypted
 
