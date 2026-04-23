@@ -163,7 +163,12 @@ source:
   password: ""                      # 不再需要
 ```
 
-启动时，桥接将提示输入主密码来解密这些值。
+启动时，桥接将提示输入主密码来解密这些值。也可以通过设置 `MXBIRDGE_MASTER_KEY` 环境变量来跳过交互式提示：
+
+```bash
+export MXBIRDGE_MASTER_KEY="your-master-password"
+python3 main.py
+```
 
 ### 配置参考
 
@@ -260,7 +265,7 @@ sudo systemctl status matrix-bridge
 3. 加密收到的访问令牌并写回 `config.yaml`
 4. 提供导入 E2EE 密钥文件的选项
 
-后续启动时，只需输入主密码（如果配置值已加密）。
+后续启动时，只需输入主密码（如果配置值已加密），或设置 `MXBIRDGE_MASTER_KEY` 环境变量来跳过提示。
 
 ## 使用方法
 

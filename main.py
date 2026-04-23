@@ -96,8 +96,10 @@ async def setup_credentials(config: dict, config_path: str) -> dict:
     if not sections_needing_setup:
         return config
 
-    master_password = getpass.getpass("Set master password for config encryption: ")
-    confirm = getpass.getpass("Confirm master password: ")
+    master_password = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Set master password for config encryption: ")
+    if not master_password:
+        raise ValueError("Master password is required (set MXBIRDGE_MASTER_KEY env or enter interactively)")
+    confirm = master_password if os.environ.get("MXBIRDGE_MASTER_KEY") else getpass.getpass("Confirm master password: ")
     if master_password != confirm:
         raise ValueError("Master passwords do not match")
 
@@ -166,7 +168,7 @@ def _config_needs_key(config: dict) -> bool:
 
 
 async def main() -> None:
-    config_path = "config.yaml"
+    config_path = os.environ.get("MXBRIDGE_CONFIG", "config.yaml")
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
 
@@ -186,7 +188,9 @@ async def main() -> None:
 
     if _config_needs_key(config):
         try:
-            master_key = getpass.getpass("Enter master password to decrypt config: ")
+            master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password to decrypt config: ")
+            if not master_key:
+                raise ValueError("Master password is required (set MXBIRDGE_MASTER_KEY env or enter interactively)")
             config = decrypt_config(config, master_key)
             logger.info("Config decrypted successfully")
         except ValueError as e:

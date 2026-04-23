@@ -42,11 +42,11 @@ bridge:
   message_format: "[{room_name}] {sender}: {text}"
   state_path: "state.json"
 
-  media:
-    enabled: true
+  media:                        # Forward media files (images, audio, video, files) to target server
+    enabled: true                # Set to false to skip media forwarding (text only, default: true)
 
-  call_notifications:
-    enabled: true
+  call_notifications:            # Forward call notifications (voice/video call started/ended) to target server
+    enabled: true                # Set to false to skip call notifications (default: true)
 
   message_store:
     enabled: false            # Set to true to persist all messages to SQLite
