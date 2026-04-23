@@ -101,7 +101,7 @@ def _decrypt_config_if_needed(config: dict) -> dict:
     )
     if not needs_key:
         return config
-    master_key = getpass.getpass("Enter master password to decrypt config: ")
+    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password to decrypt config: ")
     return decrypt_config(config, master_key)
 
 

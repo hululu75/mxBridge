@@ -125,7 +125,7 @@ class MatrixTargetBackend(MatrixBackend):
                     continue
                 await self._state.mark_processed(event.event_id)
                 room = client.rooms.get(room_id)
-                sender_displayname = self._get_sender_displayname(room, event.sender) if room else event.sender
+                sender_displayname = await self._get_sender_displayname(room, event.sender) if room else event.sender
                 logger.warning(
                     "[%s] Detected undecrypted megolm event %s from %s",
                     self.name, event.event_id, event.sender,
@@ -183,7 +183,7 @@ class MatrixTargetBackend(MatrixBackend):
         except Exception as e:
             logger.warning("[%s] Failed to decrypt: %s", self.name, e)
             await self._state.mark_processed(event.event_id)
-            sender_displayname = self._get_sender_displayname(room, event.sender)
+            sender_displayname = await self._get_sender_displayname(room, event.sender)
             try:
                 await self.send_message(
                     room.room_id,
@@ -229,7 +229,7 @@ class MatrixTargetBackend(MatrixBackend):
                 source_room_id=room.room_id,
                 source_room_name="target",
                 sender=event.sender,
-                sender_displayname=self._get_sender_displayname(room, event.sender),
+                sender_displayname=await self._get_sender_displayname(room, event.sender),
                 text=text,
                 timestamp=event.server_timestamp,
                 event_id=original_event_id or event.event_id,
@@ -249,7 +249,7 @@ class MatrixTargetBackend(MatrixBackend):
                 source_room_id=room.room_id,
                 source_room_name="target",
                 sender=event.sender,
-                sender_displayname=self._get_sender_displayname(room, event.sender),
+                sender_displayname=await self._get_sender_displayname(room, event.sender),
                 text=action,
                 timestamp=event.server_timestamp,
                 event_id=original_event_id or event.event_id,
@@ -277,7 +277,7 @@ class MatrixTargetBackend(MatrixBackend):
             source_room_id=room.room_id,
             source_room_name="target",
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text=message_text,
             timestamp=event.server_timestamp,
             event_id=original_event_id or event.event_id,
@@ -296,7 +296,7 @@ class MatrixTargetBackend(MatrixBackend):
             source_room_id=room.room_id,
             source_room_name="target",
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text=event.body or "",
             timestamp=event.server_timestamp,
             event_id=original_event_id or event.event_id,

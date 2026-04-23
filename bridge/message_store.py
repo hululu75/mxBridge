@@ -110,6 +110,43 @@ class RoomAlias(peewee.Model):
         table_name = "room_aliases"
 
 
+class ProcessedEvent(peewee.Model):
+    event_id = peewee.CharField(primary_key=True)
+
+    class Meta:
+        database = db
+        table_name = "state_processed_events"
+
+
+class EventRoomMap(peewee.Model):
+    event_id = peewee.CharField(primary_key=True)
+    room_id = peewee.CharField()
+
+    class Meta:
+        database = db
+        table_name = "state_event_room_map"
+
+
+class SourceTargetMap(peewee.Model):
+    source_event_id = peewee.CharField(primary_key=True)
+    target_event_id = peewee.CharField()
+
+    class Meta:
+        database = db
+        table_name = "state_source_target_map"
+
+
+class FailedDecryption(peewee.Model):
+    session_id = peewee.CharField()
+    room_id = peewee.CharField()
+    event_id = peewee.CharField()
+
+    class Meta:
+        database = db
+        table_name = "state_failed_decryptions"
+        primary_key = peewee.CompositeKey("session_id", "event_id")
+
+
 def _validate_date(value: str) -> bool:
     return bool(_DATE_RE.match(value))
 
@@ -125,7 +162,11 @@ class MessageStore:
         })
         db.initialize(self._real_db)
         db.connect(reuse_if_open=True)
-        db.create_tables([Message, BridgeConfig, UserAlias, RoomAlias], safe=True)
+        db.create_tables(
+            [Message, BridgeConfig, UserAlias, RoomAlias,
+             ProcessedEvent, EventRoomMap, SourceTargetMap, FailedDecryption],
+            safe=True,
+        )
         self._migrate()
         self._ensure_indexes()
         self._init_fts()

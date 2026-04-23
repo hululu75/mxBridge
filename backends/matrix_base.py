@@ -65,6 +65,8 @@ class MatrixBackend(BaseBackend):
         self._call_cleanup_task: Optional[asyncio.Task] = None
         self._pending_encrypted: dict[str, dict] = {}
         self._config_path = config_path
+        self._displayname_cache: dict[str, str] = {}
+        self._room_name_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------ client
 
@@ -72,10 +74,19 @@ class MatrixBackend(BaseBackend):
         assert self._client is not None
         return self._client
 
-    def _get_sender_displayname(self, room, sender: str) -> str:
+    async def _get_sender_displayname(self, room, sender: str) -> str:
         user = room.users.get(sender)
         if user and user.display_name:
             return user.display_name
+        if sender in self._displayname_cache:
+            return self._displayname_cache[sender]
+        try:
+            resp = await self._get_client().get_displayname(sender)
+            if hasattr(resp, "displayname") and resp.displayname:
+                self._displayname_cache[sender] = resp.displayname
+                return resp.displayname
+        except Exception:
+            pass
         return sender
 
     def get_own_user_id(self) -> str:
@@ -91,20 +102,43 @@ class MatrixBackend(BaseBackend):
                 return user.display_name
         return client.user_id
 
-    def get_room_name_for(self, room_id: str) -> str:
+    async def get_room_name_for(self, room_id: str) -> str:
         client = self._client
         if not client:
             return room_id
         room = client.rooms.get(room_id)
-        if not room:
-            return room_id
-        if room.name:
-            return room.name
-        if room.canonical_alias:
-            return room.canonical_alias
-        display = room.display_name or ""
-        if display and display.lower().replace(" ", "") not in ("emptyroom", "empty"):
-            return display
+        if room:
+            if room.name:
+                return room.name
+            if room.canonical_alias:
+                return room.canonical_alias
+            display = room.display_name or ""
+            if display and display.lower().replace(" ", "") not in ("emptyroom", "empty"):
+                return display
+        if room_id in self._room_name_cache:
+            return self._room_name_cache[room_id]
+        try:
+            resp = await client.room_get_state_event(room_id, "m.room.name", "")
+            if hasattr(resp, "content"):
+                name = resp.content.get("name")
+                if name:
+                    self._room_name_cache[room_id] = name
+                    return name
+        except Exception:
+            pass
+        try:
+            resp = await client.room_get_state_event(room_id, "m.room.canonical_alias", "")
+            if hasattr(resp, "content"):
+                alias = resp.content.get("alias")
+                if alias:
+                    self._room_name_cache[room_id] = alias
+                    return alias
+                aliases = resp.content.get("alt_aliases")
+                if aliases:
+                    self._room_name_cache[room_id] = aliases[0]
+                    return aliases[0]
+        except Exception:
+            pass
         return room_id
 
     async def _init_client(self) -> Optional[str]:

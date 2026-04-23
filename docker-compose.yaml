@@ -1,0 +1,11 @@
+services:
+  matrix-bridge:
+    build: .
+    container_name: matrix-bridge
+    restart: unless-stopped
+    environment:
+      - MXBIRDGE_MASTER_KEY=${MASTER_KEY:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ./store:/app/store
+      - ./media:/app/media

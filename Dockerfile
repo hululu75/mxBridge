@@ -11,9 +11,9 @@ COPY bridge/ bridge/
 COPY store/ store/
 
 RUN useradd -r -m appuser
-RUN mkdir -p /app/store /app/media && chown -R appuser:appuser /app
+RUN mkdir -p /app/config /app/store /app/media && chown -R appuser:appuser /app
 USER appuser
 
-VOLUME ["/app/store", "/app/media"]
+VOLUME ["/app/config", "/app/store", "/app/media"]
 
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["python", "main.py", "/app/config/config.yaml"]

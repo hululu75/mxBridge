@@ -690,9 +690,10 @@ Symmetric encryption for sensitive config values (access tokens, passwords, key 
 1. Load config.yaml
 2. Setup logging (stdout or rotating file)
 3. Check for encrypted fields (enc: prefix)
-   └─ Prompt for master password, call decrypt_config()
+   └─ Read MXBIRDGE_MASTER_KEY env var, or prompt for master password, call decrypt_config()
 4. Interactive credential setup (if access_token missing)
    ├─ Login with password via _matrix_login()
+   ├─ Read MXBIRDGE_MASTER_KEY env var, or prompt for master password (with confirmation)
    ├─ Encrypt token with master password
    ├─ Write back to config.yaml
    └─ Optional: import encryption keys
@@ -712,7 +713,7 @@ Symmetric encryption for sensitive config values (access tokens, passwords, key 
 #### Interactive Credential Setup
 
 When `access_token` is missing from a backend section, `setup_credentials()`:
-1. Prompts for a master password (with confirmation)
+1. Reads `MXBIRDGE_MASTER_KEY` env var, or prompts for a master password (with confirmation)
 2. Logs in with the configured password
 3. Encrypts the received access token with the master password
 4. Writes the encrypted token back to `config.yaml`

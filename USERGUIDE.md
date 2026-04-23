@@ -163,7 +163,12 @@ source:
   password: ""                      # no longer needed
 ```
 
-At startup, the bridge will prompt for the master password to decrypt these values.
+At startup, the bridge will prompt for the master password to decrypt these values. You can also set the `MXBIRDGE_MASTER_KEY` environment variable to skip the interactive prompt:
+
+```bash
+export MXBIRDGE_MASTER_KEY="your-master-password"
+python3 main.py
+```
 
 ### Configuration reference
 
@@ -260,7 +265,7 @@ If `access_token` is not provided in config but `password` is, the bridge will:
 3. Encrypt the received access token and write it back to `config.yaml`
 4. Offer to import an E2EE key file
 
-On subsequent starts, you only need to enter the master password (if config values are encrypted).
+On subsequent starts, you only need to enter the master password (if config values are encrypted), or set the `MXBIRDGE_MASTER_KEY` environment variable to skip the prompt.
 
 ## Usage
 
