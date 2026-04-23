@@ -507,16 +507,14 @@ async def main_async() -> None:
     if not store_cfg.get("enabled", False) and not args.dry_run:
         logger.info("message_store not enabled in config, but continuing for backfill")
 
+    store = MessageStore(store_path, media_dir=store_cfg.get("media_dir", "") if not args.dry_run else "")
+    logger.info("MessageStore opened: %s", store_path)
+
     state = StateManager(bridge_config.get("state_path", "state.json"))
     await state.load()
 
     logger.info("Connecting to Matrix as %s ...", source_config.get("user_id"))
     client = await _init_client(source_config, state)
-
-    store = None
-    if not args.dry_run:
-        store = MessageStore(store_path, media_dir=store_cfg.get("media_dir", ""))
-        logger.info("MessageStore opened: %s", store_path)
 
     args.media_dir = store_cfg.get("media_dir", "") if not args.no_media else ""
     args.media_max_size = source_config.get("media_max_size", 50 * 1024 * 1024)

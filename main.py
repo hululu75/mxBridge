@@ -199,9 +199,6 @@ async def main() -> None:
         logger.error("Credential setup failed: %s", e)
         sys.exit(1)
 
-    state = StateManager(config.get("bridge", {}).get("state_path", "state.json"))
-    await state.load()
-
     source_config = config.get("source", {})
     target_config = config.get("target", {})
     bridge_config = config.get("bridge", {})
@@ -230,6 +227,9 @@ async def main() -> None:
             logger.error("Backup mode requires message_store to be enabled")
             sys.exit(1)
         logger.log(ALWAYS, "Running in backup mode (no target, messages will be saved only)")
+
+    state = StateManager(bridge_config.get("state_path", "state.json"))
+    await state.load()
 
     source = MatrixSourceBackend("source", source_config, state, config_path=config_path)
 

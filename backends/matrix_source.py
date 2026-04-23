@@ -293,7 +293,7 @@ class MatrixSourceBackend(MatrixBackend):
                     logger.warning("[%s] Retry decrypt failed for %s: %s", self.name, enc_event.event_id, e)
 
         # Retry persisted events (cross-restart scenario)
-        persisted = self._state.pop_failed_decryptions(session_id)
+        persisted = await self._state.pop_failed_decryptions(session_id)
         persisted = [p for p in persisted if p["event_id"] not in handled_ids]
         if persisted:
             logger.info(
