@@ -152,7 +152,7 @@ bridge:
 使用加密工具加密访问令牌和密码：
 
 ```bash
-python3 encrypt_tool.py encrypt
+python3 scripts/encrypt_tool.py encrypt
 ```
 
 这将提示输入值和主密码，然后输出 `enc:...` 字符串。用加密值替换 `config.yaml` 中的明文：
@@ -373,36 +373,36 @@ location / {
 
 ```bash
 # 从所有房间导入最近 30 天的消息
-python3 backfill.py
+python3 scripts/backfill.py
 
 # 导入指定房间，最近 7 天
-python3 backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
+python3 scripts/backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
 
 # 模拟运行（显示将要导入的内容）
-python3 backfill.py --dry-run
+python3 scripts/backfill.py --dry-run
 
 # 跳过媒体下载
-python3 backfill.py --no-media
+python3 scripts/backfill.py --no-media
 
 # 限制最多 1000 条消息
-python3 backfill.py --limit 1000
+python3 scripts/backfill.py --limit 1000
 ```
 
 ### Repair media — 修复损坏的文件
 
 ```bash
 # 检查并修复损坏的媒体文件
-python3 repair_media.py
+python3 scripts/repair_media.py
 
 # 模拟运行（显示将要修复的内容）
-python3 repair_media.py --dry-run
+python3 scripts/repair_media.py --dry-run
 ```
 
 ### Encrypt tool — 加密/解密配置值
 
 ```bash
-python3 encrypt_tool.py encrypt    # 加密一个值
-python3 encrypt_tool.py decrypt    # 解密一个值
+python3 scripts/encrypt_tool.py encrypt    # 加密一个值
+python3 scripts/encrypt_tool.py decrypt    # 解密一个值
 ```
 
 ## 密钥导入
@@ -476,7 +476,7 @@ logging:
 - 确保输入了正确的主密码
 - 如果密码丢失，需要重新加密凭据：
   1. 获取新的访问令牌
-  2. 使用 `encrypt_tool.py encrypt` 和新主密码加密
+   2. 使用 `scripts/encrypt_tool.py encrypt` 和新主密码加密
   3. 用新的加密值更新 `config.yaml`
 
 ## 重要说明

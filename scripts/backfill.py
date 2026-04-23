@@ -18,11 +18,14 @@ database (skipping duplicates by event_id).
 """
 from __future__ import annotations
 
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import asyncio
 import getpass
 import logging
-import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
