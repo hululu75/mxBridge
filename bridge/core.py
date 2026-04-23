@@ -462,7 +462,7 @@ class BridgeCore:
                 source_room_id = await self._resolve_reply_room(msg.reply_to_event_id)
             if source_room_id:
                 msg.source_room_id = source_room_id
-                msg.source_room_name = self._source.get_room_name_for(source_room_id)
+                msg.source_room_name = await self._source.get_room_name_for(source_room_id)
                 msg.sender = self._source.get_own_user_id()
                 msg.sender_displayname = self._source.get_own_displayname()
                 await self._store_message(msg)
@@ -487,7 +487,7 @@ class BridgeCore:
                 await self._send_notice(msg.source_room_id, "Message delivery failed: could not resolve the target room.")
                 return
             msg.source_room_id = resolved
-            msg.source_room_name = self._source.get_room_name_for(resolved)
+            msg.source_room_name = await self._source.get_room_name_for(resolved)
             msg.sender = self._source.get_own_user_id()
             msg.sender_displayname = self._source.get_own_displayname()
             await self._store_message(msg)

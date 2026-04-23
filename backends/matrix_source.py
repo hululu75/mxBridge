@@ -124,7 +124,7 @@ class MatrixSourceBackend(MatrixBackend):
 
     # -------------------------------------------------- room helpers
 
-    def _get_room_name(self, room: MatrixRoom) -> str:
+    async def _get_room_name(self, room: MatrixRoom) -> str:
         if room.name:
             return room.name
         if room.canonical_alias:
@@ -132,6 +132,31 @@ class MatrixSourceBackend(MatrixBackend):
         display = room.display_name or ""
         if display and display.lower().replace(" ", "") not in ("emptyroom", "empty"):
             return display
+        if room.room_id in self._room_name_cache:
+            return self._room_name_cache[room.room_id]
+        client = self._get_client()
+        try:
+            resp = await client.room_get_state_event(room.room_id, "m.room.name", "")
+            if hasattr(resp, "content"):
+                name = resp.content.get("name")
+                if name:
+                    self._room_name_cache[room.room_id] = name
+                    return name
+        except Exception:
+            pass
+        try:
+            resp = await client.room_get_state_event(room.room_id, "m.room.canonical_alias", "")
+            if hasattr(resp, "content"):
+                alias = resp.content.get("alias")
+                if alias:
+                    self._room_name_cache[room.room_id] = alias
+                    return alias
+                aliases = resp.content.get("alt_aliases")
+                if aliases:
+                    self._room_name_cache[room.room_id] = aliases[0]
+                    return aliases[0]
+        except Exception:
+            pass
         return room.room_id
 
     async def _query_all_room_members(self) -> None:
@@ -231,9 +256,9 @@ class MatrixSourceBackend(MatrixBackend):
         await self._state.mark_processed(event.event_id)
         msg = BridgeMessage(
             source_room_id=room.room_id,
-            source_room_name=self._get_room_name(room),
+            source_room_name=await self._get_room_name(room),
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text="",
             timestamp=event.server_timestamp,
             event_id=event.event_id,
@@ -309,9 +334,9 @@ class MatrixSourceBackend(MatrixBackend):
                 edited_text = (event.body or "").lstrip("* ")
             msg = BridgeMessage(
                 source_room_id=room.room_id,
-                source_room_name=self._get_room_name(room),
+                source_room_name=await self._get_room_name(room),
                 sender=event.sender,
-                sender_displayname=self._get_sender_displayname(room, event.sender),
+                sender_displayname=await self._get_sender_displayname(room, event.sender),
                 text=edited_text,
                 timestamp=event.server_timestamp,
                 event_id=original_event_id or event.event_id,
@@ -326,9 +351,9 @@ class MatrixSourceBackend(MatrixBackend):
 
         msg = BridgeMessage(
             source_room_id=room.room_id,
-            source_room_name=self._get_room_name(room),
+            source_room_name=await self._get_room_name(room),
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text=event.body or "",
             timestamp=event.server_timestamp,
             event_id=original_event_id or event.event_id,
@@ -351,9 +376,9 @@ class MatrixSourceBackend(MatrixBackend):
         media_url, info, data = await self._download_media(event)
         msg = BridgeMessage(
             source_room_id=room.room_id,
-            source_room_name=self._get_room_name(room),
+            source_room_name=await self._get_room_name(room),
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text=event.body or "",
             timestamp=event.server_timestamp,
             event_id=original_event_id or event.event_id,
@@ -410,9 +435,9 @@ class MatrixSourceBackend(MatrixBackend):
         call_type = "video" if is_video else "voice"
         msg = BridgeMessage(
             source_room_id=room.room_id,
-            source_room_name=self._get_room_name(room),
+            source_room_name=await self._get_room_name(room),
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text=f"📞 {call_type} call started",
             timestamp=event.server_timestamp,
             event_id=event.event_id,
@@ -430,9 +455,9 @@ class MatrixSourceBackend(MatrixBackend):
         call_type = "video" if call_info and call_info.get("is_video") else "voice"
         msg = BridgeMessage(
             source_room_id=room.room_id,
-            source_room_name=self._get_room_name(room),
+            source_room_name=await self._get_room_name(room),
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text="📞 Call answered",
             timestamp=event.server_timestamp,
             event_id=event.event_id,
@@ -458,9 +483,9 @@ class MatrixSourceBackend(MatrixBackend):
 
         msg = BridgeMessage(
             source_room_id=room.room_id,
-            source_room_name=self._get_room_name(room),
+            source_room_name=await self._get_room_name(room),
             sender=event.sender,
-            sender_displayname=self._get_sender_displayname(room, event.sender),
+            sender_displayname=await self._get_sender_displayname(room, event.sender),
             text=f"📞 {call_type} call ended",
             timestamp=event.server_timestamp,
             event_id=event.event_id,
