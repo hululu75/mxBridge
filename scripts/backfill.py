@@ -228,18 +228,27 @@ async def _init_client(source_config: dict, state: StateManager) -> AsyncClient:
     return client
 
 
-def _enrich_mentions(body: str, content: dict) -> str:
+def _enrich_mentions(body: str, content: dict, displayname_map: dict | None = None) -> str:
+    names_to_prefix: list[str] = []
     fmt = content.get("formatted_body", "")
-    if not fmt:
-        return body
-    mentions = re.findall(
-        r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
-    )
-    if not mentions:
+    if fmt:
+        for mxid, displayname in re.findall(
+            r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
+        ):
+            names_to_prefix.append(displayname)
+    if not names_to_prefix:
+        m_mentions = content.get("m.mentions")
+        if isinstance(m_mentions, dict):
+            for uid in m_mentions.get("user_ids", []):
+                dn = (displayname_map or {}).get(uid)
+                if dn and dn in body:
+                    names_to_prefix.append(dn)
+    if not names_to_prefix:
         return body
     text = body
-    for mxid, displayname in mentions:
-        text = text.replace(displayname, f"@{displayname}", 1)
+    for name in names_to_prefix:
+        if name in text and not text.startswith("@"):
+            text = text.replace(name, f"@{name}", 1)
     return text
 
 def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[BridgeMessage]:
@@ -260,6 +269,8 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
     else:
         content = {}
 
+    dn_map = {u_id: u.display_name for u_id, u in room.users.items() if u.display_name}
+
     relates_to = content.get("m.relates_to", {}) if isinstance(content, dict) else {}
     new_content = content.get("m.new_content") if isinstance(content, dict) else None
 
@@ -267,7 +278,7 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
         edited_text = new_content.get("body", "")
         if not edited_text:
             edited_text = (getattr(event, "body", "") or "").lstrip("* ")
-        edited_text = _enrich_mentions(edited_text, new_content)
+        edited_text = _enrich_mentions(edited_text, new_content, dn_map)
         return BridgeMessage(
             source_room_id=room_id,
             source_room_name=room_name,
@@ -304,7 +315,7 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
         msgtype = MessageType.TEXT
 
     text = getattr(event, "body", "") or decrypted_body or ""
-    text = _enrich_mentions(text, content)
+    text = _enrich_mentions(text, content, dn_map)
     media_url = getattr(event, "url", None)
     is_media = isinstance(event, (RoomMessageImage, RoomMessageVideo, RoomMessageAudio, RoomMessageFile, RoomMessageMedia, RoomEncryptedMedia))
     media_filename = getattr(event, "body", "") if (media_url or is_media) else ""

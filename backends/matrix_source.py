@@ -317,18 +317,27 @@ class MatrixSourceBackend(MatrixBackend):
     # -------------------------------------------------- message handlers
 
     @staticmethod
-    def _enrich_mentions(body: str, content: dict) -> str:
+    def _enrich_mentions(body: str, content: dict, displayname_map: dict | None = None) -> str:
+        names_to_prefix: list[str] = []
         fmt = content.get("formatted_body", "")
-        if not fmt:
-            return body
-        mentions = re.findall(
-            r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
-        )
-        if not mentions:
+        if fmt:
+            for mxid, displayname in re.findall(
+                r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
+            ):
+                names_to_prefix.append(displayname)
+        if not names_to_prefix:
+            m_mentions = content.get("m.mentions")
+            if isinstance(m_mentions, dict):
+                for uid in m_mentions.get("user_ids", []):
+                    dn = (displayname_map or {}).get(uid)
+                    if dn and dn in body:
+                        names_to_prefix.append(dn)
+        if not names_to_prefix:
             return body
         text = body
-        for mxid, displayname in mentions:
-            text = text.replace(displayname, f"@{displayname}", 1)
+        for name in names_to_prefix:
+            if name in text and not text.startswith("@"):
+                text = text.replace(name, f"@{name}", 1)
         return text
 
     async def _handle_text(
@@ -343,12 +352,13 @@ class MatrixSourceBackend(MatrixBackend):
         content = source.get("content", {}) if isinstance(source, dict) else {}
         relates_to = content.get("m.relates_to", {})
         new_content = content.get("m.new_content")
+        dn_map = {u_id: u.display_name for u_id, u in room.users.items() if u.display_name}
 
         if relates_to.get("rel_type") == "m.replace" and new_content and isinstance(new_content, dict):
             edited_text = new_content.get("body", "")
             if not edited_text:
                 edited_text = (event.body or "").lstrip("* ")
-            edited_text = self._enrich_mentions(edited_text, new_content)
+            edited_text = self._enrich_mentions(edited_text, new_content, dn_map)
             msg = BridgeMessage(
                 source_room_id=room.room_id,
                 source_room_name=await self._get_room_name(room),
@@ -371,7 +381,7 @@ class MatrixSourceBackend(MatrixBackend):
             source_room_name=await self._get_room_name(room),
             sender=event.sender,
             sender_displayname=await self._get_sender_displayname(room, event.sender),
-            text=self._enrich_mentions(event.body or "", content),
+            text=self._enrich_mentions(event.body or "", content, dn_map),
             timestamp=event.server_timestamp,
             event_id=original_event_id or event.event_id,
             backend_name=self.name,
