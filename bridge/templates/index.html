@@ -944,10 +944,6 @@ function hideBackfillDialog() {
   document.getElementById('backfillOverlay').style.display = 'none';
   if (bfPollTimer) { clearInterval(bfPollTimer); bfPollTimer = null; }
 }
-document.getElementById('bfClear').addEventListener('change', function() {
-  document.getElementById('bfClearWarn').style.display = this.checked ? 'block' : 'none';
-  if (!this.checked) document.getElementById('bfClearConfirm').checked = false;
-});
 async function startBackfill() {
   const days = parseInt(document.getElementById('bfDays').value) || 0;
   const noMedia = !document.getElementById('bfMedia').checked;
@@ -1016,7 +1012,7 @@ function pollBackfill() {
         <label for="bfMedia" style="font-size:.9em;color:#ccc">Download media files</label>
       </div>
       <div style="margin-bottom:18px;display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="bfClear" style="accent-color:#0f3460">
+        <input type="checkbox" id="bfClear" style="accent-color:#0f3460" onchange="document.getElementById('bfClearWarn').style.display=this.checked?'block':'none';if(!this.checked)document.getElementById('bfClearConfirm').checked=false;">
         <label for="bfClear" style="font-size:.9em;color:#e74c3c">Clear database &amp; media before backfill</label>
       </div>
       <div id="bfClearWarn" style="display:none;margin-bottom:14px;padding:8px 12px;background:#3a1a1a;border:1px solid #e74c3c;border-radius:6px;font-size:.82em;color:#e74c3c">
