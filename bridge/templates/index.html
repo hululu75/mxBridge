@@ -892,7 +892,7 @@ marked.setOptions({ breaks: true, gfm: true, html: false });
 function renderMd(text) {
   if (!text) return '';
   let h = marked.parse(text);
-  h = h.replace(/@([^:]+):/g, '<span class="mention">@$1</span>:');
+  h = h.replace(/\x02([^\x03]+)\x03/g, '<span class="mention">@$1</span>');
   return h;
 }
 function mediaUrl(eid) {

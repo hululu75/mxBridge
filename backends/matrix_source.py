@@ -316,6 +316,9 @@ class MatrixSourceBackend(MatrixBackend):
 
     # -------------------------------------------------- message handlers
 
+    MENTION_START = "\x02"
+    MENTION_END = "\x03"
+
     @staticmethod
     def _enrich_mentions(body: str, content: dict, displayname_map: dict | None = None) -> str:
         names_to_prefix: list[str] = []
@@ -334,14 +337,13 @@ class MatrixSourceBackend(MatrixBackend):
                         names_to_prefix.append(dn)
         if not names_to_prefix:
             return body
+        ms = MatrixSource.MENTION_START
+        me = MatrixSource.MENTION_END
         text = body
         for name in names_to_prefix:
-            if text.startswith("@"):
-                continue
-            if f"{name}:" in text:
-                text = text.replace(f"{name}:", f"@{name}:", 1)
-            elif name in text:
-                text = text.replace(name, f"@{name}", 1)
+            marker = f"{ms}{name}{me}"
+            if marker not in text and name in text:
+                text = text.replace(name, marker, 1)
         return text
 
     async def _handle_text(
