@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Optional
 
@@ -315,6 +316,21 @@ class MatrixSourceBackend(MatrixBackend):
 
     # -------------------------------------------------- message handlers
 
+    @staticmethod
+    def _enrich_mentions(body: str, content: dict) -> str:
+        fmt = content.get("formatted_body", "")
+        if not fmt:
+            return body
+        mentions = re.findall(
+            r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
+        )
+        if not mentions:
+            return body
+        text = body
+        for mxid, displayname in mentions:
+            text = text.replace(displayname, f"@{displayname}", 1)
+        return text
+
     async def _handle_text(
         self,
         room: MatrixRoom,
@@ -332,6 +348,7 @@ class MatrixSourceBackend(MatrixBackend):
             edited_text = new_content.get("body", "")
             if not edited_text:
                 edited_text = (event.body or "").lstrip("* ")
+            edited_text = self._enrich_mentions(edited_text, new_content)
             msg = BridgeMessage(
                 source_room_id=room.room_id,
                 source_room_name=await self._get_room_name(room),
@@ -354,7 +371,7 @@ class MatrixSourceBackend(MatrixBackend):
             source_room_name=await self._get_room_name(room),
             sender=event.sender,
             sender_displayname=await self._get_sender_displayname(room, event.sender),
-            text=event.body or "",
+            text=self._enrich_mentions(event.body or "", content),
             timestamp=event.server_timestamp,
             event_id=original_event_id or event.event_id,
             backend_name=self.name,

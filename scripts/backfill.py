@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import getpass
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -227,6 +228,20 @@ async def _init_client(source_config: dict, state: StateManager) -> AsyncClient:
     return client
 
 
+def _enrich_mentions(body: str, content: dict) -> str:
+    fmt = content.get("formatted_body", "")
+    if not fmt:
+        return body
+    mentions = re.findall(
+        r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
+    )
+    if not mentions:
+        return body
+    text = body
+    for mxid, displayname in mentions:
+        text = text.replace(displayname, f"@{displayname}", 1)
+    return text
+
 def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[BridgeMessage]:
     room_id = room.room_id
     room_name = _get_room_name(room)
@@ -252,6 +267,7 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
         edited_text = new_content.get("body", "")
         if not edited_text:
             edited_text = (getattr(event, "body", "") or "").lstrip("* ")
+        edited_text = _enrich_mentions(edited_text, new_content)
         return BridgeMessage(
             source_room_id=room_id,
             source_room_name=room_name,
@@ -288,6 +304,7 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
         msgtype = MessageType.TEXT
 
     text = getattr(event, "body", "") or decrypted_body or ""
+    text = _enrich_mentions(text, content)
     media_url = getattr(event, "url", None)
     is_media = isinstance(event, (RoomMessageImage, RoomMessageVideo, RoomMessageAudio, RoomMessageFile, RoomMessageMedia, RoomEncryptedMedia))
     media_filename = getattr(event, "body", "") if (media_url or is_media) else ""
