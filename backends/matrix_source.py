@@ -336,7 +336,11 @@ class MatrixSourceBackend(MatrixBackend):
             return body
         text = body
         for name in names_to_prefix:
-            if name in text and not text.startswith("@"):
+            if text.startswith("@"):
+                continue
+            if f"{name}:" in text:
+                text = text.replace(f"{name}:", f"@{name}:", 1)
+            elif name in text:
                 text = text.replace(name, f"@{name}", 1)
         return text
 
