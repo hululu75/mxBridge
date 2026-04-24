@@ -891,8 +891,25 @@ function formatSize(b) {
 marked.setOptions({ breaks: true, gfm: true, html: false });
 function renderMd(text) {
   if (!text) return '';
-  text = text.replace(/(^|\s)@(\S+)/g, '$1<span class="mention">@$2</span>');
-  return marked.parse(text);
+  let html = marked.parse(text);
+  const el = document.createElement('div');
+  el.innerHTML = html;
+  const walk = (n) => {
+    if (n.nodeType === 3) {
+      const s = n.textContent.replace(/(^|\s)@(\S+)/g, '$1<span class="mention">@$2</span>');
+      if (s !== n.textContent) {
+        const frag = document.createDocumentFragment();
+        const tmp = document.createElement('span');
+        tmp.innerHTML = s;
+        while (tmp.firstChild) frag.appendChild(tmp.firstChild);
+        n.parentNode.replaceChild(frag, n);
+      }
+    } else if (n.nodeType === 1 && n.tagName !== 'CODE' && n.tagName !== 'PRE') {
+      for (let c of Array.from(n.childNodes)) walk(c);
+    }
+  };
+  walk(el);
+  return el.innerHTML;
 }
 function mediaUrl(eid) {
   return '/api/media/' + encodeURIComponent(eid) + (token ? '?token=' + encodeURIComponent(token) : '');
