@@ -205,6 +205,8 @@ class MatrixTargetBackend(MatrixBackend):
             return
         entry = self._pending_encrypted.pop(session_id)
         pending = entry["events"]
+        for _, ev in pending:
+            self._pending_event_ids.discard(ev.event_id)
         logger.info(
             "[%s] Room key arrived for session %s, retrying %d pending event(s)",
             self.name, session_id, len(pending),

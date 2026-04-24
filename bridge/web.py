@@ -17,6 +17,7 @@ from aiohttp import web
 
 from bridge.message_store import MessageStore
 from bridge.state import StateManager
+from scripts.backfill import _init_client, backfill_room, _get_room_name
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +272,6 @@ class WebServer:
     async def _run_backfill(self, source_config: dict, bridge_config: dict,
                             store_cfg: dict, days: int, no_media: bool,
                             clear_before: bool) -> None:
-        from scripts.backfill import _init_client, backfill_room, _get_room_name
         client = None
         try:
             if clear_before:

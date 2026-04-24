@@ -6,6 +6,8 @@ import logging
 import os
 from typing import Optional
 
+import peewee
+
 from bridge.message_store import (
     BridgeConfig,
     EventRoomMap,
@@ -153,10 +155,10 @@ class StateManager:
 
     def _trim_and_save_event_room(self, event_id: str, room_id: str) -> None:
         EventRoomMap.replace(event_id=event_id, room_id=room_id).execute()
-        if EventRoomMap.select().count() > MAX_EVENT_MAP:
-            excess = EventRoomMap.select().count() - MAX_EVENT_MAP
-            oldest = EventRoomMap.select().order_by(EventRoomMap.rowid.asc()).limit(excess)
-            removed = [r.event_id for r in oldest]
+        count = EventRoomMap.select().count()
+        if count > MAX_EVENT_MAP:
+            excess = count - MAX_EVENT_MAP
+            removed = [r.event_id for r in EventRoomMap.select(EventRoomMap.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
             EventRoomMap.delete().where(EventRoomMap.event_id << removed).execute()
             for eid in removed:
                 self._event_room_map.pop(eid, None)
@@ -172,10 +174,10 @@ class StateManager:
 
     def _trim_and_save_source_target(self, source_event_id: str, target_event_id: str) -> None:
         SourceTargetMap.replace(source_event_id=source_event_id, target_event_id=target_event_id).execute()
-        if SourceTargetMap.select().count() > MAX_EVENT_MAP:
-            excess = SourceTargetMap.select().count() - MAX_EVENT_MAP
-            oldest = SourceTargetMap.select().order_by(SourceTargetMap.rowid.asc()).limit(excess)
-            removed = [r.source_event_id for r in oldest]
+        count = SourceTargetMap.select().count()
+        if count > MAX_EVENT_MAP:
+            excess = count - MAX_EVENT_MAP
+            removed = [r.source_event_id for r in SourceTargetMap.select(SourceTargetMap.source_event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
             SourceTargetMap.delete().where(SourceTargetMap.source_event_id << removed).execute()
             for sid in removed:
                 self._source_target_map.pop(sid, None)
@@ -218,10 +220,10 @@ class StateManager:
 
     def _trim_and_save_processed(self, event_id: str) -> None:
         ProcessedEvent.insert(event_id=event_id).on_conflict_ignore().execute()
-        if ProcessedEvent.select().count() > MAX_PROCESSED_CACHE:
-            excess = ProcessedEvent.select().count() - MAX_PROCESSED_CACHE
-            oldest = ProcessedEvent.select().order_by(ProcessedEvent.rowid.asc()).limit(excess)
-            removed = [r.event_id for r in oldest]
+        count = ProcessedEvent.select().count()
+        if count > MAX_PROCESSED_CACHE:
+            excess = count - MAX_PROCESSED_CACHE
+            removed = [r.event_id for r in ProcessedEvent.select(ProcessedEvent.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
             ProcessedEvent.delete().where(ProcessedEvent.event_id << removed).execute()
             self._processed_set -= set(removed)
 
@@ -265,24 +267,27 @@ class StateManager:
             ).on_conflict_ignore().execute()
         except Exception:
             pass
-        total = FailedDecryption.select().count()
-        if total > MAX_FAILED_DECRYPTIONS:
-            excess = total - MAX_FAILED_DECRYPTIONS
-            oldest = FailedDecryption.select().order_by(FailedDecryption.rowid.asc()).limit(excess)
-            removed_sessions: dict[str, list[str]] = {}
-            for r in oldest:
-                removed_sessions.setdefault(r.session_id, []).append(r.event_id)
-                FailedDecryption.delete().where(
-                    (FailedDecryption.session_id == r.session_id) & (FailedDecryption.event_id == r.event_id)
-                ).execute()
-            for sid, eids in removed_sessions.items():
-                session_events = self._failed_decryptions.get(sid)
-                if session_events:
-                    remaining = [e for e in session_events if e["event_id"] not in set(eids)]
-                    if remaining:
-                        self._failed_decryptions[sid] = remaining
-                    else:
-                        self._failed_decryptions.pop(sid, None)
+        count = FailedDecryption.select().count()
+        if count > MAX_FAILED_DECRYPTIONS:
+            excess = count - MAX_FAILED_DECRYPTIONS
+            oldest = list(FailedDecryption.select(FailedDecryption.session_id, FailedDecryption.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess))
+            if oldest:
+                removed_sessions: dict[str, set[str]] = {}
+                for r in oldest:
+                    removed_sessions.setdefault(r.session_id, set()).add(r.event_id)
+                all_pairs = [(r.session_id, r.event_id) for r in oldest]
+                for sid, eid in all_pairs:
+                    FailedDecryption.delete().where(
+                        (FailedDecryption.session_id == sid) & (FailedDecryption.event_id == eid)
+                    ).execute()
+                for sid, eids in removed_sessions.items():
+                    session_events = self._failed_decryptions.get(sid)
+                    if session_events:
+                        remaining = [e for e in session_events if e["event_id"] not in eids]
+                        if remaining:
+                            self._failed_decryptions[sid] = remaining
+                        else:
+                            self._failed_decryptions.pop(sid, None)
 
     async def pop_failed_decryptions(self, session_id: str) -> list[dict]:
         items = self._failed_decryptions.pop(session_id, [])

@@ -51,6 +51,7 @@ from nio import (
     SyncResponse,
     WhoamiResponse,
 )
+from nio.crypto.attachments import decrypt_attachment
 
 from bridge.crypto import decrypt_config, is_encrypted
 from bridge.message_store import MessageStore
@@ -359,7 +360,6 @@ async def _download_media_for(client: AsyncClient, event, max_size: int) -> Opti
             return None
         if isinstance(event, RoomEncryptedMedia):
             try:
-                from nio.crypto.attachments import decrypt_attachment
                 data = decrypt_attachment(
                     data,
                     key=event.key["k"],
@@ -407,6 +407,11 @@ async def backfill_room(
     decrypted_fail = 0
     media_downloaded = 0
     redacted_ids: set[str] = set()
+    existing_ids: set[str] = set()
+    if store and not args.dry_run:
+        existing_ids = store.get_existing_event_ids(room_id)
+    pending_user_aliases: dict[str, str] = {}
+    pending_room_aliases: dict[str, str] = {}
     end_token = None
     batch = 0
     max_size = args.media_max_size
@@ -462,7 +467,7 @@ async def backfill_room(
                 if not isinstance(event, RoomMessage):
                     continue
 
-            if store and store.event_id_exists(event.event_id):
+            if store and event.event_id in existing_ids:
                 skipped += 1
                 continue
 
@@ -478,12 +483,18 @@ async def backfill_room(
                         msg.media_size = len(data)
                         media_downloaded += 1
                 store.save_message(msg, args.media_dir if not args.no_media else "")
+                existing_ids.add(event.event_id)
                 if msg.sender_displayname and msg.sender_displayname != msg.sender:
-                    store.upsert_user_alias(msg.sender, msg.sender_displayname)
+                    pending_user_aliases[msg.sender] = msg.sender_displayname
                 if msg.source_room_name and msg.source_room_name != msg.source_room_id:
-                    store.upsert_room_alias(msg.source_room_id, msg.source_room_name)
+                    pending_room_aliases[msg.source_room_id] = msg.source_room_name
 
             saved += 1
+
+        if store and not args.dry_run and (pending_user_aliases or pending_room_aliases):
+            store.batch_upsert_aliases(pending_user_aliases, pending_room_aliases)
+            pending_user_aliases.clear()
+            pending_room_aliases.clear()
 
         if saved > 0 and saved % 500 == 0:
             logger.info("[%s] Progress: %d saved, %d skipped", room_name, saved, skipped)

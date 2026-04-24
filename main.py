@@ -19,6 +19,7 @@ from bridge.core import BridgeCore
 from bridge.crypto import decrypt_config, encrypt, is_encrypted
 from bridge.message_store import MessageStore
 from bridge.state import StateManager
+from bridge.web import WebServer
 
 ALWAYS = 60
 logging.addLevelName(ALWAYS, "ALWAYS")
@@ -331,7 +332,6 @@ async def main() -> None:
     web_cfg = bridge_config.get("web", {})
     if web_cfg.get("enabled", False):
         if message_store:
-            from bridge.web import WebServer
             media_dir = store_cfg.get("media_dir", "")
             web_server = WebServer(message_store, web_cfg, media_dir=media_dir, full_config=config)
             logger.info("Web interface configured on %s:%s", web_cfg.get("host", "0.0.0.0"), web_cfg.get("port", 8080))

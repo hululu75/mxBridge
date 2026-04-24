@@ -546,6 +546,15 @@ class MessageStore:
         except Exception:
             return False
 
+    def get_existing_event_ids(self, room_id: str) -> set[str]:
+        try:
+            return {
+                row.event_id for row in
+                Message.select(Message.event_id).where(Message.source_room_id == room_id)
+            }
+        except Exception:
+            return set()
+
     def save_message(self, msg: BridgeMessage, media_dir: str = "") -> None:
         if not msg.event_id:
             return
@@ -587,6 +596,16 @@ class MessageStore:
         except Exception:
             logger.error("Failed to save message %s", msg.event_id, exc_info=True)
 
+    def save_message_with_aliases(self, msg: BridgeMessage, media_dir: str = "") -> None:
+        self.save_message(msg, media_dir)
+        try:
+            if msg.sender_displayname and msg.sender_displayname != msg.sender:
+                self.upsert_user_alias(msg.sender, msg.sender_displayname)
+            if msg.source_room_name and msg.source_room_name != msg.source_room_id:
+                self.upsert_room_alias(msg.source_room_id, msg.source_room_name)
+        except Exception:
+            logger.debug("Failed to update aliases for %s", msg.event_id, exc_info=True)
+
     def update_message_text(self, event_id: str, new_text: str) -> bool:
         if not event_id or not new_text:
             return False
@@ -623,23 +642,44 @@ class MessageStore:
                     next_eid, current_text = latest_by_original[current_id]
                     current_id = next_eid
                 resolved[orig_id] = (edit_eid, current_text)
+            if not resolved:
+                return 0
+            all_orig_ids = list(resolved.keys())
+            existing = set(
+                row.event_id for row in Message.select(Message.event_id).where(
+                    Message.event_id << all_orig_ids,
+                )
+            )
+            to_update: list[str] = []
+            update_texts: list[str] = []
+            to_delete_edits: list[str] = []
+            to_promote: list[str] = []
             for orig_id, (edit_eid, text) in resolved.items():
-                orig_exists = Message.select(Message.id).where(
-                    Message.event_id == orig_id,
-                ).exists()
-                if orig_exists:
-                    Message.update(text=text).where(
-                        Message.event_id == orig_id,
-                    ).execute()
-                    Message.delete().where(
-                        Message.event_id == edit_eid,
-                    ).execute()
-                    updated += 1
+                if orig_id in existing:
+                    to_update.append(orig_id)
+                    update_texts.append(text)
+                    to_delete_edits.append(edit_eid)
                 else:
+                    to_promote.append(edit_eid)
+            with db.atomic():
+                for i in range(0, len(to_update), 500):
+                    batch_ids = to_update[i:i + 500]
+                    batch_texts = update_texts[i:i + 500]
+                    batch_edits = to_delete_edits[i:i + 500]
+                    for orig_id, text, edit_eid in zip(batch_ids, batch_texts, batch_edits):
+                        Message.update(text=text).where(
+                            Message.event_id == orig_id,
+                        ).execute()
+                        Message.delete().where(
+                            Message.event_id == edit_eid,
+                        ).execute()
+                    updated += len(batch_ids)
+                for i in range(0, len(to_promote), 500):
+                    batch = to_promote[i:i + 500]
                     Message.update(direction="forward", edit_of_event_id="").where(
-                        Message.event_id == edit_eid,
+                        Message.event_id << batch,
                     ).execute()
-                    updated += 1
+                    updated += len(batch)
         except Exception:
             logger.error("Failed to reconcile edits", exc_info=True)
         return updated
@@ -667,6 +707,26 @@ class MessageStore:
                 ).execute()
         except Exception:
             logger.error("Failed to upsert room alias for %s", room_id, exc_info=True)
+
+    def batch_upsert_aliases(self, user_aliases: dict[str, str], room_aliases: dict[str, str]) -> None:
+        if not user_aliases and not room_aliases:
+            return
+        try:
+            with db.atomic():
+                for sender, displayname in user_aliases.items():
+                    if sender and displayname and displayname != sender:
+                        UserAlias.insert(sender_id=sender, displayname=displayname).on_conflict(
+                            conflict_target=[UserAlias.sender_id],
+                            update={UserAlias.displayname: displayname},
+                        ).execute()
+                for room_id, room_name in room_aliases.items():
+                    if room_id and room_name and room_name != room_id:
+                        RoomAlias.insert(room_id=room_id, room_name=room_name).on_conflict(
+                            conflict_target=[RoomAlias.room_id],
+                            update={RoomAlias.room_name: room_name},
+                        ).execute()
+        except Exception:
+            logger.error("Failed to batch upsert aliases", exc_info=True)
 
     def delete_message(self, event_id: str) -> bool:
         if not event_id:
@@ -804,35 +864,46 @@ class MessageStore:
         page: int,
         limit: int,
     ) -> dict:
-        q = Message.select()
+        clauses = []
+        params: list = []
         if query:
-            q = q.where(Message.text.contains(query))
+            clauses.append("text LIKE ?")
+            params.append(f"%{query}%")
         if room_id:
-            q = q.where(Message.source_room_id == room_id)
+            clauses.append("source_room_id = ?")
+            params.append(room_id)
         if sender:
-            q = q.where(Message.sender == sender)
+            clauses.append("sender = ?")
+            params.append(sender)
         if date_from and _validate_date(date_from):
-            q = q.where(Message.timestamp >= _date_to_ms(date_from))
+            clauses.append("timestamp >= ?")
+            params.append(_date_to_ms(date_from))
         if date_to and _validate_date(date_to):
-            q = q.where(Message.timestamp <= _date_to_ms(_normalize_date_to(date_to)))
+            clauses.append("timestamp <= ?")
+            params.append(_date_to_ms(_normalize_date_to(date_to)))
 
-        total = q.count()
+        cols = ", ".join(MESSAGE_COLUMNS)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        count_sql = f"SELECT COUNT(*) FROM messages{where}"
+        total = db.execute_sql(count_sql, params).fetchone()[0]
+
         offset = (page - 1) * limit
-        rows = q.order_by(Message.timestamp.desc()).offset(offset).limit(limit)
-        results = [self._model_to_dict(m) for m in rows]
-        results = self._enrich_aliases(results)
-        return {"total": total, "page": page, "limit": limit, "results": results}
+        data_sql = f"SELECT {cols} FROM messages{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        rows = [self._row_to_dict(row) for row in db.execute_sql(data_sql, params + [limit, offset]).fetchall()]
+        rows = self._enrich_aliases(rows)
+        return {"total": total, "page": page, "limit": limit, "results": rows}
 
     def get_room_history(
         self, room_id: str, page: int = 1, limit: int = 50
     ) -> dict:
-        q = Message.select().where(Message.source_room_id == room_id)
-        total = q.count()
+        cols = ", ".join(MESSAGE_COLUMNS)
+        count_sql = "SELECT COUNT(*) FROM messages WHERE source_room_id = ?"
+        total = db.execute_sql(count_sql, [room_id]).fetchone()[0]
         offset = (page - 1) * limit
-        rows = q.order_by(Message.timestamp.asc()).offset(offset).limit(limit)
-        results = [self._model_to_dict(m) for m in rows]
-        results = self._enrich_aliases(results)
-        return {"total": total, "page": page, "limit": limit, "results": results}
+        data_sql = f"SELECT {cols} FROM messages WHERE source_room_id = ? ORDER BY timestamp ASC LIMIT ? OFFSET ?"
+        rows = [self._row_to_dict(row) for row in db.execute_sql(data_sql, [room_id, limit, offset]).fetchall()]
+        rows = self._enrich_aliases(rows)
+        return {"total": total, "page": page, "limit": limit, "results": rows}
 
     def get_message_context(
         self, event_id: str, before: int = 25, after: int = 25
@@ -925,26 +996,23 @@ class MessageStore:
         return None
 
     def get_stats(self) -> dict:
-        total = Message.select().count()
-        rooms = db.execute_sql(
-            "SELECT COUNT(DISTINCT source_room_id) FROM messages"
-        ).fetchone()[0]
-        forward = Message.select().where(Message.direction == "forward").count()
-        reply = Message.select().where(Message.direction == "reply").count()
-        earliest = None
-        latest = None
-        if total > 0:
-            first = Message.select().order_by(Message.timestamp.asc()).first()
-            last = Message.select().order_by(Message.timestamp.desc()).first()
-            if first:
-                earliest = self._format_timestamp(first.timestamp)
-            if last:
-                latest = self._format_timestamp(last.timestamp)
+        row = db.execute_sql(
+            "SELECT COUNT(*),"
+            " COUNT(DISTINCT source_room_id),"
+            " SUM(CASE WHEN direction='forward' THEN 1 ELSE 0 END),"
+            " SUM(CASE WHEN direction='reply' THEN 1 ELSE 0 END),"
+            " MIN(timestamp),"
+            " MAX(timestamp)"
+            " FROM messages"
+        ).fetchone()
+        total, rooms, forward, reply, earliest_ts, latest_ts = row
+        earliest = self._format_timestamp(earliest_ts) if earliest_ts else None
+        latest = self._format_timestamp(latest_ts) if latest_ts else None
         return {
-            "total_messages": total,
-            "total_rooms": rooms,
-            "forward_count": forward,
-            "reply_count": reply,
+            "total_messages": total or 0,
+            "total_rooms": rooms or 0,
+            "forward_count": forward or 0,
+            "reply_count": reply or 0,
             "earliest_message": earliest,
             "latest_message": latest,
         }
@@ -993,16 +1061,28 @@ class MessageStore:
     def _enrich_aliases(self, results: list[dict]) -> list[dict]:
         if not results:
             return results
+        senders = {r.get("sender", "") for r in results if not r.get("sender_displayname") or r.get("sender_displayname") == r.get("sender")}
+        rooms = {r.get("source_room_id", "") for r in results if not r.get("source_room_name") or r.get("source_room_name") == r.get("source_room_id")}
         user_map: dict[str, str] = {}
         room_map: dict[str, str] = {}
         try:
-            for row in db.execute_sql("SELECT sender_id, displayname FROM user_aliases").fetchall():
-                user_map[row[0]] = row[1]
+            if senders:
+                placeholders = ",".join(["?"] * len(senders))
+                for row in db.execute_sql(
+                    f"SELECT sender_id, displayname FROM user_aliases WHERE sender_id IN ({placeholders})",
+                    list(senders),
+                ).fetchall():
+                    user_map[row[0]] = row[1]
         except Exception:
             pass
         try:
-            for row in db.execute_sql("SELECT room_id, room_name FROM room_aliases").fetchall():
-                room_map[row[0]] = row[1]
+            if rooms:
+                placeholders = ",".join(["?"] * len(rooms))
+                for row in db.execute_sql(
+                    f"SELECT room_id, room_name FROM room_aliases WHERE room_id IN ({placeholders})",
+                    list(rooms),
+                ).fetchall():
+                    room_map[row[0]] = row[1]
         except Exception:
             pass
         if not user_map and not room_map:

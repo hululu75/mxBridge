@@ -34,7 +34,7 @@ from nio import (
 from nio.crypto.attachments import decrypt_attachment
 
 from bridge.crypto import decrypt_config, is_encrypted
-from bridge.message_store import MessageStore
+from bridge.message_store import MessageStore, db, Message
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s: %(message)s",
@@ -265,39 +265,37 @@ async def main_async() -> None:
 
     store = MessageStore(db_path, db_password=master_key)
 
-    # Fetch all messages that have a local media file
-    from bridge.message_store import db, Message
-    rows = list(
-        Message.select(
-            Message.event_id,
-            Message.source_room_id,
-            Message.media_local_path,
-            Message.msgtype,
-        ).where(
-            (Message.media_local_path != "") &
-            (Message.msgtype.in_(["m.image", "m.video", "m.audio", "m.file"]))
-        )
+    query = Message.select(
+        Message.event_id,
+        Message.source_room_id,
+        Message.media_local_path,
+        Message.msgtype,
+    ).where(
+        (Message.media_local_path != "") &
+        (Message.msgtype.in_(["m.image", "m.video", "m.audio", "m.file"]))
     )
 
-    if not rows:
+    corrupted = []
+    total_count = 0
+    for r in query.iterator():
+        total_count += 1
+        path = os.path.join(media_dir, r.media_local_path)
+        if os.path.isfile(path) and not _is_valid_media(path):
+            corrupted.append(r)
+
+    if not total_count:
         logger.info("No media records found in database")
         store.close()
         return
 
-    logger.info("Found %d media records, scanning for corrupted files...", len(rows))
+    logger.info("Found %d media records, %d corrupted files", total_count, len(corrupted))
 
-    # Count corrupted files before connecting to Matrix
-    corrupted = [
-        r for r in rows
-        if not _is_valid_media(os.path.join(media_dir, r.media_local_path))
-        and os.path.isfile(os.path.join(media_dir, r.media_local_path))
-    ]
     image_corrupted = [r for r in corrupted if r.msgtype == "m.image"]
 
     logger.info(
         "%d corrupted files found (%d images), %d appear valid",
         len(corrupted), len(image_corrupted),
-        len(rows) - len(corrupted),
+        total_count - len(corrupted),
     )
 
     if not corrupted:
@@ -315,15 +313,15 @@ async def main_async() -> None:
             r.event_id, r.source_room_id, r.media_local_path,
             args.dry_run,
         )
-        stats[result] = stats.get(result, 0) + 1
+        stats[result] += 1
 
     await client.close()
     store.close()
 
     logger.info(
         "Done: %d repaired, %d failed, %d not-encrypted, %d missing",
-        stats.get("ok", 0), stats.get("failed", 0),
-        stats.get("not_encrypted", 0), stats.get("missing", 0),
+        stats["ok"], stats["failed"],
+        stats["not_encrypted"], stats["missing"],
     )
 
 

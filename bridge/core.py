@@ -118,22 +118,9 @@ class BridgeCore:
     async def _store_message(self, msg: BridgeMessage) -> None:
         if self._store:
             try:
-                await asyncio.to_thread(self._store.save_message, msg, self._media_dir)
+                await asyncio.to_thread(self._store.save_message_with_aliases, msg, self._media_dir)
             except Exception:
                 logger.error("Failed to save message to store", exc_info=True)
-            try:
-                if msg.sender_displayname and msg.sender_displayname != msg.sender:
-                    await asyncio.to_thread(
-                        self._store.upsert_user_alias,
-                        msg.sender, msg.sender_displayname,
-                    )
-                if msg.source_room_name and msg.source_room_name != msg.source_room_id:
-                    await asyncio.to_thread(
-                        self._store.upsert_room_alias,
-                        msg.source_room_id, msg.source_room_name,
-                    )
-            except Exception:
-                pass
 
     async def _on_source_message(self, msg: BridgeMessage) -> None:
         if msg.direction == MessageDirection.REDACT:

@@ -29,6 +29,7 @@ from nio import (
     UnknownToDeviceEvent,
     WhoamiResponse,
 )
+from nio.crypto.attachments import decrypt_attachment
 
 from backends.base import BaseBackend
 from bridge.models import MessageType
@@ -64,6 +65,7 @@ class MatrixBackend(BaseBackend):
         self._key_upload_task: Optional[asyncio.Task] = None
         self._call_cleanup_task: Optional[asyncio.Task] = None
         self._pending_encrypted: dict[str, dict] = {}
+        self._pending_event_ids: set[str] = set()
         self._config_path = config_path
         self._displayname_cache: dict[str, str] = {}
         self._room_name_cache: dict[str, str] = {}
@@ -96,11 +98,18 @@ class MatrixBackend(BaseBackend):
         client = self._client
         if not client:
             return self.config.get("user_id", "")
+        cached = self._displayname_cache.get("__own__")
+        if cached:
+            return cached
         for room in client.rooms.values():
             user = room.users.get(client.user_id)
             if user and user.display_name:
+                self._displayname_cache["__own__"] = user.display_name
                 return user.display_name
         return client.user_id
+
+    def _invalidate_own_displayname_cache(self) -> None:
+        self._displayname_cache.pop("__own__", None)
 
     async def get_room_name_for(self, room_id: str) -> str:
         client = self._client
@@ -352,12 +361,15 @@ class MatrixBackend(BaseBackend):
         now = time.monotonic()
         if session_id not in self._pending_encrypted and len(self._pending_encrypted) >= MAX_PENDING_SESSIONS:
             oldest = next(iter(self._pending_encrypted))
-            del self._pending_encrypted[oldest]
+            old_entry = self._pending_encrypted.pop(oldest)
+            for _, ev in old_entry.get("events", []):
+                self._pending_event_ids.discard(ev.event_id)
             logger.warning("[%s] pending_encrypted full, evicted oldest session %s", self.name, oldest)
         entry = self._pending_encrypted.setdefault(session_id, {
             "events": [], "first_seen": now, "last_requested": 0.0,
         })
-        if not any(e2.event_id == event.event_id for _, e2 in entry["events"]):
+        if event.event_id not in self._pending_event_ids:
+            self._pending_event_ids.add(event.event_id)
             entry["events"].append((room, event))
 
         await self._on_pending_encrypted_enqueued(room, event, session_id, error)
@@ -404,12 +416,15 @@ class MatrixBackend(BaseBackend):
 
     async def _sync_loop(self) -> None:
         client = self._get_client()
+        backoff = 0
         while self._running:
             try:
                 resp = await client.sync(timeout=SYNC_TIMEOUT)
                 if isinstance(resp, SyncResponse):
+                    backoff = 0
                     if resp.next_batch:
                         await self._state.save_sync_token(self.name, resp.next_batch)
+                    self._invalidate_own_displayname_cache()
                     await self._after_sync(client, resp)
                     try:
                         if client.outgoing_to_device_messages:
@@ -425,6 +440,7 @@ class MatrixBackend(BaseBackend):
                     except Exception as e:
                         logger.warning("[%s] Key maintenance error: %s", self.name, e)
                 else:
+                    backoff = min(backoff + 5, 60)
                     tr = getattr(resp, "transport_response", None)
                     if tr is not None:
                         status = getattr(tr, "status", None)
@@ -439,10 +455,11 @@ class MatrixBackend(BaseBackend):
                         )
                     else:
                         logger.warning("[%s] Sync error: %s", self.name, resp)
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(backoff)
             except Exception as e:
+                backoff = min(backoff + 10, 120)
                 logger.error("[%s] Sync exception: %s", self.name, e)
-                await asyncio.sleep(10)
+                await asyncio.sleep(backoff)
 
     # ------------------------------------------------------- media helpers
 
@@ -485,7 +502,6 @@ class MatrixBackend(BaseBackend):
                         data = None
                     elif isinstance(event, RoomEncryptedMedia):
                         try:
-                            from nio.crypto.attachments import decrypt_attachment
                             data = decrypt_attachment(
                                 data,
                                 key=event.key["k"],
