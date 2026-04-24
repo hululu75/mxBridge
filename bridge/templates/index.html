@@ -630,7 +630,6 @@ function renderCards(data, showRoom) {
   const list = document.getElementById('messageList');
   const msgs = data.results || [];
   if (!msgs.length) { list.innerHTML = '<div class="empty">No messages found</div>'; return; }
-  collectDisplayNames(msgs);
 
   let html = '<div class="result-list">';
   msgs.forEach(m => {
@@ -653,7 +652,7 @@ function renderCards(data, showRoom) {
           `<span class="sender">${esc(m.sender_displayname || m.sender)}</span>` +
           tags + `<span>${ts}</span>` +
         `</div>` +
-        `<div class="text">${renderMd(m.text, m.sender_displayname)}</div>` + extra +
+        `<div class="text">${renderMd(m.text)}</div>` + extra +
       `</div>`;
   });
   const totalPages = Math.ceil(data.total / data.limit);
@@ -671,7 +670,6 @@ function renderRoomTimeline(preserveScroll) {
   const list = document.getElementById('messageList');
   const msgs = roomMessages;
   if (!msgs.length) { list.innerHTML = '<div class="empty">No messages found</div>'; return; }
-  collectDisplayNames(msgs);
 
   const prevScrollH = preserveScroll ? list.scrollHeight : 0;
 
@@ -703,7 +701,7 @@ function renderRoomTimeline(preserveScroll) {
     if (newGroup) {
       html += `<div class="tl-header"><span class="tl-name" style="color:${color}">${esc(m.sender_displayname || m.sender)}</span><span class="tl-time">${esc(ts)}</span></div>`;
     }
-    if (m.text) html += `<div class="tl-text">${renderMd(m.text, m.sender_displayname)}</div>`;
+    if (m.text) html += `<div class="tl-text">${renderMd(m.text)}</div>`;
     else if (!m.media_filename && m.msgtype !== 'call_notification') html += `<div class="tl-text empty-text">(no text)</div>`;
     html += mediaHtml(m);
     if (m.msgtype === 'call_notification')
@@ -818,7 +816,6 @@ function renderContext(preserveScroll = false) {
     `<div class="ctx-load"><button onclick="loadOlderCtx()">↑ Load older</button></div>` +
     `<div class="timeline">`;
 
-  collectDisplayNames(ctxMessages);
   let prevSender = null, prevDateStr = null;
   ctxMessages.forEach(m => {
     const dateStr = m.timestamp ? new Date(m.timestamp).toLocaleDateString() : '';
@@ -842,7 +839,7 @@ function renderContext(preserveScroll = false) {
     if (newGroup) {
       html += `<div class="tl-header"><span class="tl-name" style="color:${color}">${esc(m.sender_displayname || m.sender)}</span><span class="tl-time">${esc(ts)}</span></div>`;
     }
-    if (m.text) html += `<div class="tl-text">${renderMd(m.text, m.sender_displayname)}</div>`;
+    if (m.text) html += `<div class="tl-text">${renderMd(m.text)}</div>`;
     else if (!m.media_filename && m.msgtype !== 'call_notification') html += `<div class="tl-text empty-text">(no text)</div>`;
     html += mediaHtml(m);
     if (m.msgtype === 'call_notification')
@@ -891,36 +888,11 @@ function formatSize(b) {
 </script>
 <script src="/static/marked.min.js"></script>
 <script>
-let allDisplayNames = [];
-
-function collectDisplayNames(msgs) {
-  const seen = new Set();
-  allDisplayNames = [];
-  msgs.forEach(m => {
-    const dn = m.sender_displayname;
-    if (dn && dn.length > 2 && !seen.has(dn)) {
-      seen.add(dn);
-      allDisplayNames.push(dn);
-    }
-  });
-  allDisplayNames.sort((a, b) => b.length - a.length);
-}
-
 marked.setOptions({ breaks: true, gfm: true, html: false });
-function renderMd(text, senderDn) {
+function renderMd(text) {
   if (!text) return '';
-  const names = allDisplayNames.filter(dn => dn !== senderDn);
-  const phs = [];
-  let t = text;
-  t = t.replace(/(^|\s)@(\S+)/g, (m, p, n) => { const i = phs.length; phs.push('@' + n); return p + '\x00M' + i + '\x00'; });
-  for (const dn of names) {
-    const re = new RegExp(dn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
-    t = t.replace(re, (m) => { const i = phs.length; phs.push(m); return '\x00M' + i + '\x00'; });
-  }
-  let h = marked.parse(t);
-  for (let i = 0; i < phs.length; i++) {
-    h = h.replace('\x00M' + i + '\x00', '<span class="mention">' + esc(phs[i]) + '</span>');
-  }
+  let h = marked.parse(text);
+  h = h.replace(/@([^:]+):/g, '<span class="mention">@$1</span>:');
   return h;
 }
 function mediaUrl(eid) {
