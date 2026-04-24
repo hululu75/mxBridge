@@ -335,7 +335,8 @@ class MessageStore:
         try:
             enc_db = _create_encrypted_db(path, db_key)
             enc_db.connect()
-            enc_db.create_tables(ALL_MODELS, safe=True)
+            db.initialize(enc_db)
+            db.create_tables(ALL_MODELS, safe=True)
 
             for table, columns in table_columns.items():
                 if not columns or row_counts.get(table, 0) == 0:
