@@ -114,6 +114,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .mention{color:#e5c07b;background:rgba(229,192,123,.1);padding:0 3px;border-radius:3px}
 .msg .call-tag{display:inline-block;background:#6b3a2a;padding:2px 8px;border-radius:4px;color:#ffb347;font-size:.75em;margin-top:4px}
 
+/* ── Reply reference ── */
+.reply-ref{border-left:3px solid #0f3460;padding:2px 8px;margin-bottom:4px;border-radius:0 4px 4px 0;cursor:pointer;font-size:.82em;color:#888;background:rgba(15,52,96,.2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:background .15s}
+.reply-ref:hover{background:rgba(15,52,96,.45);color:#bbb}
+.reply-ref-name{color:#5dade2;font-weight:500;margin-right:6px}
+.reply-ref-text{color:#888}
+
 /* ── Pagination ── */
 .pagination{display:flex;justify-content:center;gap:8px;padding:16px;align-items:center}
 .pagination button{padding:6px 16px;background:#0f3460;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px}
@@ -701,6 +707,7 @@ function renderRoomTimeline(preserveScroll) {
     if (newGroup) {
       html += `<div class="tl-header"><span class="tl-name" style="color:${color}">${esc(m.sender_displayname || m.sender)}</span><span class="tl-time">${esc(ts)}</span></div>`;
     }
+    html += replyRefHtml(m, roomMessages);
     if (m.text) html += `<div class="tl-text">${renderMd(m.text)}</div>`;
     else if (!m.media_filename && m.msgtype !== 'call_notification') html += `<div class="tl-text empty-text">(no text)</div>`;
     html += mediaHtml(m);
@@ -839,6 +846,7 @@ function renderContext(preserveScroll = false) {
     if (newGroup) {
       html += `<div class="tl-header"><span class="tl-name" style="color:${color}">${esc(m.sender_displayname || m.sender)}</span><span class="tl-time">${esc(ts)}</span></div>`;
     }
+    html += replyRefHtml(m, ctxMessages);
     if (m.text) html += `<div class="tl-text">${renderMd(m.text)}</div>`;
     else if (!m.media_filename && m.msgtype !== 'call_notification') html += `<div class="tl-text empty-text">(no text)</div>`;
     html += mediaHtml(m);
@@ -902,17 +910,28 @@ function mediaUrl(eid) {
 function isImage(m) {
   return m.media_filename && m.media_local_path && (m.msgtype === 'm.image' || (m.media_mimetype && m.media_mimetype.startsWith('image/')));
 }
+function replyRefHtml(m, messages) {
+  if (!m.reply_to_event_id) return '';
+  const eid = esc(m.reply_to_event_id);
+  const replied = messages && messages.find(x => x.event_id === m.reply_to_event_id);
+  if (replied) {
+    const name = esc(replied.sender_displayname || replied.sender);
+    const preview = esc((replied.text || '').slice(0, 80)) + ((replied.text || '').length > 80 ? '…' : '');
+    return `<div class="reply-ref" onclick="event.stopPropagation();openContext('${eid}')"><span class="reply-ref-name">${name}</span><span class="reply-ref-text">${preview}</span></div>`;
+  }
+  return `<div class="reply-ref" onclick="event.stopPropagation();openContext('${eid}')">↩ 回复了消息</div>`;
+}
 function mediaHtml(m) {
   if (!m.media_filename) return '';
   if (isImage(m))
-    return `<div class="tl-media img-preview"><img src="${mediaUrl(m.event_id)}" alt="${esc(m.media_filename)}" loading="lazy" onclick="openLightbox(this.src)">${m.media_size ? `<span class="media-size">${formatSize(m.media_size)}</span>` : ''}</div>`;
+    return `<div class="tl-media img-preview"><img src="${mediaUrl(m.event_id)}" alt="${esc(m.media_filename)}" loading="lazy" onclick="openLightbox(event, this.src)">${m.media_size ? `<span class="media-size">${formatSize(m.media_size)}</span>` : ''}</div>`;
   const sizeHtml = m.media_size ? `<span class="media-size">${formatSize(m.media_size)}</span>` : '';
   if (m.media_local_path)
     return `<div class="tl-media"><span>📎</span><a class="media-dl" href="${mediaUrl(m.event_id)}" download="${esc(m.media_filename)}" onclick="event.stopPropagation()">${esc(m.media_filename)}</a>${sizeHtml}</div>`;
   return `<div class="tl-media"><span>📎</span><span>${esc(m.media_filename)}</span>${sizeHtml}</div>`;
 }
-function openLightbox(src) {
-  event.stopPropagation();
+function openLightbox(evt, src) {
+    evt.stopPropagation();
   const lb = document.getElementById('lightbox');
   lb.querySelector('img').src = src;
   lb.style.display = 'flex';

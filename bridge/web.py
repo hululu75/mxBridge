@@ -364,6 +364,12 @@ class WebServer:
         logger.info("Backfill: media directory cleared")
 
     async def stop(self) -> None:
+        if self._backfill_task and not self._backfill_task.done():
+            self._backfill_task.cancel()
+            try:
+                await self._backfill_task
+            except asyncio.CancelledError:
+                pass
         if hasattr(self, "_runner"):
             await self._runner.cleanup()
             logger.info("Web server stopped")

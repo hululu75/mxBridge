@@ -27,7 +27,7 @@ MESSAGE_COLUMNS = [
     "sender", "sender_displayname", "text", "msgtype", "event_id",
     "target_room_id", "media_url", "media_filename", "media_mimetype",
     "media_size", "call_type", "call_action", "call_duration", "from_self",
-    "media_local_path", "edit_of_event_id",
+    "media_local_path", "edit_of_event_id", "reply_to_event_id",
 ]
 
 
@@ -75,6 +75,7 @@ class Message(peewee.Model):
     from_self = peewee.BooleanField(default=False)
     media_local_path = peewee.CharField(default="")
     edit_of_event_id = peewee.CharField(default="", index=True)
+    reply_to_event_id = peewee.CharField(default="", index=True)
 
     class Meta:
         database = db
@@ -419,6 +420,10 @@ class MessageStore:
                 db.execute_sql("ALTER TABLE messages ADD COLUMN edit_of_event_id TEXT DEFAULT ''")
                 db.execute_sql("CREATE INDEX IF NOT EXISTS messages_edit_of_event_id ON messages (edit_of_event_id)")
                 logger.info("Migrated messages table: added edit_of_event_id column")
+            if "reply_to_event_id" not in existing:
+                db.execute_sql("ALTER TABLE messages ADD COLUMN reply_to_event_id TEXT DEFAULT ''")
+                db.execute_sql("CREATE INDEX IF NOT EXISTS messages_reply_to_event_id ON messages (reply_to_event_id)")
+                logger.info("Migrated messages table: added reply_to_event_id column")
         except Exception:
             logger.warning("Failed to check/migrate messages table schema", exc_info=True)
 
@@ -570,6 +575,7 @@ class MessageStore:
                     from_self=msg.from_self,
                     media_local_path=media_local_path,
                     edit_of_event_id=msg.edit_of_event_id or "",
+                    reply_to_event_id=msg.reply_to_event_id or "",
                 )
         except peewee.IntegrityError:
             if media_local_path:
@@ -981,6 +987,7 @@ class MessageStore:
             "from_self": m.from_self,
             "media_local_path": m.media_local_path,
             "edit_of_event_id": m.edit_of_event_id,
+            "reply_to_event_id": m.reply_to_event_id,
         }
 
     def _enrich_aliases(self, results: list[dict]) -> list[dict]:

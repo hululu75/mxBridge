@@ -95,16 +95,18 @@ def _load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _decrypt_config_if_needed(config: dict) -> dict:
+def _decrypt_config_if_needed(config: dict) -> tuple[dict, str]:
     needs_key = any(
         is_encrypted(config.get(sec, {}).get(field, ""))
         for sec in ("source", "target")
         for field in ("access_token", "password", "key_import_passphrase")
     )
-    if not needs_key:
-        return config
-    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password to decrypt config: ")
-    return decrypt_config(config, master_key)
+    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password: ")
+    if not master_key:
+        raise ValueError("Master password is required")
+    if needs_key:
+        config = decrypt_config(config, master_key)
+    return config, master_key
 
 
 async def _init_client(source_config: dict) -> AsyncClient:
@@ -249,7 +251,7 @@ async def main_async() -> None:
         logger.error("Config not found: %s", args.config)
         sys.exit(1)
 
-    config = _decrypt_config_if_needed(config)
+    config, master_key = _decrypt_config_if_needed(config)
     source_config = config.get("source", {})
     bridge_config = config.get("bridge", {})
     store_cfg = bridge_config.get("message_store", {})
@@ -261,7 +263,7 @@ async def main_async() -> None:
         sys.exit(1)
     media_dir = os.path.abspath(media_dir)
 
-    store = MessageStore(db_path)
+    store = MessageStore(db_path, db_password=master_key)
 
     # Fetch all messages that have a local media file
     from bridge.message_store import db, Message

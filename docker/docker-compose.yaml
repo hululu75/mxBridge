@@ -8,6 +8,6 @@ services:
     environment:
       - MXBIRDGE_MASTER_KEY=${MASTER_KEY:-}
     volumes:
-      - ../config:/app/config:ro
+      - ../config:/app/config
       - ../store:/app/store
       - ../media:/app/media

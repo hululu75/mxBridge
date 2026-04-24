@@ -149,9 +149,10 @@ class StateManager:
 
     async def save_event_room(self, event_id: str, room_id: str) -> None:
         self._event_room_map[event_id] = room_id
-        await asyncio.to_thread(self._trim_and_save_event_room)
+        await asyncio.to_thread(self._trim_and_save_event_room, event_id, room_id)
 
-    def _trim_and_save_event_room(self) -> None:
+    def _trim_and_save_event_room(self, event_id: str, room_id: str) -> None:
+        EventRoomMap.replace(event_id=event_id, room_id=room_id).execute()
         if EventRoomMap.select().count() > MAX_EVENT_MAP:
             excess = EventRoomMap.select().count() - MAX_EVENT_MAP
             oldest = EventRoomMap.select().order_by(EventRoomMap.rowid.asc()).limit(excess)
@@ -167,9 +168,10 @@ class StateManager:
 
     async def save_source_target(self, source_event_id: str, target_event_id: str) -> None:
         self._source_target_map[source_event_id] = target_event_id
-        await asyncio.to_thread(self._trim_and_save_source_target)
+        await asyncio.to_thread(self._trim_and_save_source_target, source_event_id, target_event_id)
 
-    def _trim_and_save_source_target(self) -> None:
+    def _trim_and_save_source_target(self, source_event_id: str, target_event_id: str) -> None:
+        SourceTargetMap.replace(source_event_id=source_event_id, target_event_id=target_event_id).execute()
         if SourceTargetMap.select().count() > MAX_EVENT_MAP:
             excess = SourceTargetMap.select().count() - MAX_EVENT_MAP
             oldest = SourceTargetMap.select().order_by(SourceTargetMap.rowid.asc()).limit(excess)
