@@ -165,6 +165,9 @@ def _config_needs_key(config: dict) -> bool:
             value = section.get(field, "")
             if is_encrypted(value):
                 return True
+    web_password = config.get("bridge", {}).get("web", {}).get("password", "")
+    if is_encrypted(web_password):
+        return True
     return False
 
 
@@ -190,6 +193,9 @@ def _has_plaintext_credentials(config: dict) -> bool:
             value = section.get(field, "")
             if value and not is_encrypted(value):
                 return True
+    web_password = config.get("bridge", {}).get("web", {}).get("password", "")
+    if web_password and not is_encrypted(web_password):
+        return True
     return False
 
 
@@ -209,6 +215,13 @@ def _auto_encrypt_plaintext_fields(
             if value and not is_encrypted(value):
                 section[field] = encrypt(value, master_key)
                 changed = True
+
+    web_section = save_config.get("bridge", {}).get("web", {})
+    if isinstance(web_section, dict):
+        wp = web_section.get("password", "")
+        if wp and not is_encrypted(wp):
+            web_section["password"] = encrypt(wp, master_key)
+            changed = True
 
     if not changed:
         return config

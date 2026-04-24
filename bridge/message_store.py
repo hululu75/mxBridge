@@ -183,8 +183,11 @@ class _EncryptedSqliteDatabase(peewee.SqliteDatabase):
         conn = _sqlite3.connect(self.database, timeout=self._timeout,
                                 isolation_level=None, **self.connect_params)
         conn.execute(f"PRAGMA key = \"x'{self._cipher_key}'\"")
+        conn.execute("PRAGMA cipher_compatibility = 4")
         conn.execute("PRAGMA cipher_page_size = 4096")
+        conn.execute("PRAGMA cipher_kdf_iter = 256000")
         conn.execute("PRAGMA cipher_hmac_algorithm = HMAC_SHA256")
+        conn.execute("PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512")
         try:
             self._add_conn_hooks(conn)
         except Exception:
@@ -332,8 +335,7 @@ class MessageStore:
         try:
             enc_db = _create_encrypted_db(path, db_key)
             enc_db.connect()
-            db.initialize(enc_db)
-            db.create_tables(ALL_MODELS, safe=True)
+            enc_db.create_tables(ALL_MODELS, safe=True)
 
             for table, columns in table_columns.items():
                 if not columns or row_counts.get(table, 0) == 0:

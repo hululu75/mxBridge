@@ -90,4 +90,13 @@ def decrypt_config(config: dict, master_password: str) -> dict:
                     )
                 section[field] = decrypted
 
+    web_section = config.get("bridge", {}).get("web", {})
+    if isinstance(web_section, dict):
+        value = web_section.get("password", "")
+        if is_encrypted(value):
+            decrypted = decrypt(value, master_password)
+            if decrypted is None:
+                raise ValueError("Failed to decrypt bridge.web.password. Wrong master password?")
+            web_section["password"] = decrypted
+
     return config

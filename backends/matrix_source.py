@@ -60,12 +60,6 @@ class MatrixSourceBackend(MatrixBackend):
             client.next_batch = saved_token
             logger.info("[%s] Resumed from sync token", self.name)
 
-        resp = await client.sync(timeout=3000, full_state=True)
-        if isinstance(resp, SyncResponse):
-            logger.info("[%s] Initial sync done", self.name)
-            if resp.next_batch:
-                await self._state.save_sync_token(self.name, resp.next_batch)
-
         client.add_event_callback(
             self._on_room_event,
             (RoomMessage, CallInviteEvent, CallAnswerEvent, CallHangupEvent),
@@ -73,6 +67,12 @@ class MatrixSourceBackend(MatrixBackend):
         client.add_event_callback(self._on_encrypted_event, MegolmEvent)
         client.add_event_callback(self._on_redaction_event, RedactionEvent)
         self._register_common_callbacks(client)
+
+        resp = await client.sync(timeout=3000, full_state=True)
+        if isinstance(resp, SyncResponse):
+            logger.info("[%s] Initial sync done", self.name)
+            if resp.next_batch:
+                await self._state.save_sync_token(self.name, resp.next_batch)
 
         if client.should_query_keys:
             await client.keys_query()
