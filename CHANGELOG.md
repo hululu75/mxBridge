@@ -2,6 +2,40 @@
 
 All notable changes to the Matrix Bridge project are documented in this file.
 
+## [0.5.0] - 2026-04-24
+
+### Added
+
+- **Encrypted database** — messages.db is now encrypted with SQLCipher using a key derived from the master password via PBKDF2-HMAC-SHA512
+  - Salt stored in `messages.db.salt` (auto-generated, 16 bytes)
+  - Automatic migration of existing plaintext databases (backup kept at `messages.db.plaintext.bak`)
+  - `_EncryptedSqliteDatabase` Peewee backend wrapping `pysqlcipher3`
+- **State persistence in SQLite** — `state.json` replaced by SQLite tables within the same encrypted `messages.db`
+  - `state_processed_events`, `state_event_room_map`, `state_source_target_map`, `state_failed_decryptions` tables
+  - Automatic one-time migration from existing `state.json` (file deleted after successful migration)
+  - `StateManager.flush()` is now a no-op (writes are immediate)
+- **Master password always required** — startup always prompts for master password (or `MXBIRDGE_MASTER_KEY` env var)
+  - Used for both config field decryption and database encryption key derivation
+  - No longer optional when no encrypted fields exist
+- **Auto-encrypt plaintext credentials** — if config contains plaintext `access_token`, `password`, `key_import_passphrase`, or `web.password`, they are automatically encrypted on first run
+  - Config file must be writable by the bridge process
+  - `web.password` now supports `enc:` prefix
+- **`pysqlcipher3>=1.2.0`** added as a direct dependency (requires `libsqlcipher-dev` on Debian/Ubuntu, `sqlcipher-dev` on Alpine)
+- **`derive_db_key()`** in `bridge/crypto.py` — derives a 64-char hex key from master password + salt using PBKDF2-HMAC-SHA256
+
+### Changed
+
+- `MessageStore.__init__()` now accepts `db_password` parameter (defaults to empty for unencrypted DB)
+- `StateManager` no longer writes to JSON file; all state is stored in SQLite tables
+- `main.py` passes `master_key` as `db_password` to `MessageStore`
+- Docker image now installs `sqlcipher-dev` (build) and `sqlcipher-libs` (runtime)
+- `backfill.py` supports encrypted databases via `db_password` parameter
+- Config file header updated to document master password requirements
+
+### Removed
+
+- `state.json` file is no longer created (migrated to SQLite on first run, then deleted)
+
 ## [0.4.0] - 2026-04-21
 
 ### Added

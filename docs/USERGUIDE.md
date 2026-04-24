@@ -25,6 +25,7 @@ Matrix Bridge is a self-hosted service that forwards messages between two Matrix
 | Control commands | `!login`, `!logout`, `!pause`, `!resume`, `!status` for runtime control |
 | E2EE support | Decrypts encrypted rooms on Server A (via matrix-nio) |
 | Config encryption | Encrypt sensitive config values (access tokens, passwords) with a master password |
+| Encrypted database | SQLite database encrypted with SQLCipher, key derived from master password |
 | Message store | SQLite-based message persistence with full-text search |
 | Web interface | Searchable web UI for browsing stored messages |
 | State persistence | Survives restarts without re-processing old messages |
@@ -33,6 +34,7 @@ Matrix Bridge is a self-hosted service that forwards messages between two Matrix
 ## Prerequisites
 
 - Python 3.11+
+- `libsqlcipher-dev` (Debian/Ubuntu) or `sqlcipher-dev` (Alpine) — required for encrypted database
 - Two Matrix accounts (one on each server) that the bridge will use
 - The bridge accounts must already be **invited to and joined** the relevant rooms:
   - Server A account: joined to all rooms you want to forward
@@ -149,7 +151,7 @@ bridge:
 
 ### 4. Encrypt sensitive config values (optional)
 
-Use the encryption tool to encrypt your access tokens and passwords:
+All sensitive config values are automatically encrypted on first run. You can also manually encrypt them:
 
 ```bash
 python3 scripts/encrypt_tool.py encrypt
@@ -164,6 +166,8 @@ source:
 ```
 
 At startup, the bridge will prompt for the master password to decrypt these values. You can also set the `MXBIRDGE_MASTER_KEY` environment variable to skip the interactive prompt:
+
+> **Note:** The master password is **always required** at startup. It is used for both config field decryption and database encryption. Plaintext credentials are automatically encrypted on first run.
 
 ```bash
 export MXBIRDGE_MASTER_KEY="your-master-password"
@@ -259,13 +263,17 @@ sudo systemctl status matrix-bridge
 
 ### First-run interactive setup
 
-If `access_token` is not provided in config but `password` is, the bridge will:
-1. Prompt for a master password (for config encryption)
-2. Log in to the Matrix server with the provided password
-3. Encrypt the received access token and write it back to `config.yaml`
-4. Offer to import an E2EE key file
+The master password is **always required** at startup (via `MXBIRDGE_MASTER_KEY` env var or interactive prompt). It is used to:
+1. Decrypt encrypted config values (`enc:` prefixed fields)
+2. Derive the SQLCipher encryption key for `messages.db`
+3. Auto-encrypt any plaintext credentials found in config
 
-On subsequent starts, you only need to enter the master password (if config values are encrypted), or set the `MXBIRDGE_MASTER_KEY` environment variable to skip the prompt.
+If `access_token` is not provided in config but `password` is, the bridge will:
+1. Log in to the Matrix server with the provided password
+2. Encrypt the received access token and write it back to `config.yaml`
+3. Offer to import an E2EE key file
+
+On subsequent starts, you only need to enter the master password (or set `MXBIRDGE_MASTER_KEY`). A salt file (`messages.db.salt`) is auto-generated to derive the database encryption key — **do not delete this file**.
 
 ## Usage
 
@@ -458,8 +466,14 @@ logging:
 
 ### Duplicate messages after restart
 
-- The `state.json` file stores the sync position. If deleted, the bridge will re-process old messages.
-- Ensure `state.json` is writable and persists across restarts.
+- State is now persisted in the SQLite database (previously `state.json`). If the database is deleted, the bridge will re-process old messages.
+- On first run after upgrade, `state.json` is automatically migrated to the database and deleted.
+
+### Database migration from plaintext to encrypted
+
+- If you previously had a plaintext `messages.db`, it will be automatically migrated to SQLCipher on first run
+- A backup of the plaintext database is kept at `messages.db.plaintext.bak`
+- Verify the migration was successful, then delete the backup file manually
 
 ### Media files not forwarding
 
@@ -476,15 +490,18 @@ logging:
 ### Config decryption fails at startup
 
 - Ensure you are entering the correct master password
-- If the password is lost, you will need to re-encrypt your credentials:
-  1. Obtain new access tokens
-  2. Use `scripts/encrypt_tool.py encrypt` with a new master password
-  3. Update `config.yaml` with the new encrypted values
+- If the password is lost, you will need to re-encrypt your credentials and **recreate the database**:
+  1. Delete `messages.db`, `messages.db.salt`, and `messages.db.plaintext.bak` (if any)
+  2. Obtain new access tokens
+  3. Use `scripts/encrypt_tool.py encrypt` with a new master password
+  4. Update `config.yaml` with the new encrypted values
 
 ## Important notes
 
 - **Do not delete the `store/` directories** — they contain E2EE keys. Deleting them means the bridge loses all decryption ability and must be re-trusted by other users.
 - **Do not change `device_id`** after it has been assigned — changing it creates a new device, requiring re-verification. On first run, leave it empty in config and the server will assign one automatically.
+- **Do not delete `messages.db.salt`** — it is required to derive the database encryption key. Loss means the database is unreadable.
+- **Do not lose the master password** — it is required for both config decryption and database access. Loss means all encrypted data is unrecoverable.
 - **The bridge account on A will appear as an unverified device** to other users. They can verify it in their client (Element: Settings → Security → Verify device) to suppress warnings.
 - **Messages during `!pause` are saved but not forwarded.** When you `!resume`, only new messages will be forwarded — paused messages were already saved to the store.
 - **`!logout` clears all event mappings.** After logging back in with `!login`, previously forwarded messages cannot be edited/retracted retroactively.

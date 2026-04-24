@@ -9,7 +9,8 @@ A self-hosted service that forwards messages between two Matrix homeservers. It 
 - **Reverse replies** — users on B can send messages back to A via `!send` command or Matrix reply threading
 - **E2EE support** — decrypts encrypted rooms via matrix-nio, with automatic SAS verification and key import
 - **Config encryption** — encrypt sensitive values (access tokens, passwords) with a master password
-- **Backup mode** — save all messages + media to local SQLite without forwarding
+- **Encrypted database** — SQLite database encrypted with SQLCipher, key derived from master password
+- **Backup mode** — save all messages + media to local encrypted SQLite without forwarding
 - **Web interface** — searchable web UI with full-text search, room browsing, and media viewing
 - **Backfill** — import historical messages via CLI or web UI
 - **Runtime control** — `!login`, `!logout`, `!pause`, `!resume`, `!status` commands
@@ -23,15 +24,15 @@ A self-hosted service that forwards messages between two Matrix homeservers. It 
 cp config.example.yaml config/config.yaml
 # Edit config/config.yaml with your settings
 
-# Set master key for non-interactive startup (if using encrypted config)
-export MASTER_KEY="your-master-password"
+# Set master key for non-interactive startup (required)
+export MXBIRDGE_MASTER_KEY="your-master-password"
 
 docker compose -f docker/docker-compose.yaml up -d
 ```
 
 ### Manual
 
-**Prerequisites:** Python 3.11+, two Matrix accounts (one per server)
+**Prerequisites:** Python 3.11+, two Matrix accounts (one per server), `libsqlcipher-dev` (Debian/Ubuntu) or `sqlcipher-dev` (Alpine)
 
 ```bash
 pip install -r requirements.txt
@@ -122,17 +123,21 @@ bridge:
 
 | Variable | Description |
 |----------|-------------|
-| `MXBIRDGE_MASTER_KEY` | Master password for config decryption (skips interactive prompt) |
+| `MXBIRDGE_MASTER_KEY` | Master password for config decryption and database encryption (required) |
 | `MXBRIDGE_CONFIG` | Path to config file (default: `config.yaml`) |
 
 ### First-run setup
 
+The master password is **always required** at startup. It is used to:
+1. Decrypt encrypted config values (`enc:` prefixed fields)
+2. Derive the SQLCipher encryption key for `messages.db`
+3. Auto-encrypt any plaintext credentials found in config
+
 If `access_token` is missing but `password` is provided, the bridge will:
 
-1. Prompt for a master password (or use `MXBIRDGE_MASTER_KEY`)
-2. Log in to the Matrix server
-3. Encrypt the access token and write it back to `config.yaml`
-4. Offer to import an E2EE key file
+1. Log in to the Matrix server
+2. Encrypt the access token and write it back to `config.yaml`
+3. Offer to import an E2EE key file
 
 ## Usage
 
@@ -195,6 +200,8 @@ python3 scripts/encrypt_tool.py decrypt
 
 - **Do not delete `store/`** — it contains E2EE keys. Loss means the bridge must be re-trusted.
 - **Do not change `device_id`** after assignment — it creates a new device requiring re-verification.
+- **Do not delete `messages.db.salt`** — it is required to derive the database encryption key. Loss means the database is unreadable.
+- **Do not lose the master password** — it is required for both config decryption and database access. Loss means all encrypted data is unrecoverable.
 - **The web interface has no TLS** — use a reverse proxy (Nginx, Caddy) for remote access.
 
 ## License

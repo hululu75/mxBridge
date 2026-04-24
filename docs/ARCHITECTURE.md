@@ -53,6 +53,8 @@ Two operating modes are supported:
 - **Bridge mode** (default): forwards messages from source to target server, with optional reverse replies and control commands.
 - **Backup mode**: when `target` section is absent from config, saves all messages and media to local SQLite storage without forwarding.
 
+All persistent state (sync tokens, event mappings, processed events, failed decryptions) and messages are stored in a single **encrypted SQLite database** (`messages.db`) using SQLCipher. The encryption key is derived from the master password via PBKDF2-HMAC-SHA256. A salt file (`messages.db.salt`) ensures the database key is unique per installation.
+
 ---
 
 ## 2. Project Structure
@@ -78,10 +80,10 @@ matrix/
 │   ├── __init__.py
 │   ├── models.py                 # BridgeMessage dataclass — unified cross-backend message model
 │   ├── core.py                   # BridgeCore — message routing, backup mode, control commands
-│   ├── state.py                  # StateManager — sync tokens, event dedup, forwarding state, event maps
-│   ├── message_store.py          # MessageStore — SQLite-backed message persistence with FTS5
+│   ├── state.py                  # StateManager — sync tokens, event dedup, forwarding state, event maps (SQLite-backed)
+│   ├── message_store.py          # MessageStore — SQLCipher-encrypted SQLite with FTS5 + state tables
 │   ├── web.py                    # WebServer — aiohttp HTTP API for message search and browsing
-│   ├── crypto.py                 # Config field encryption/decryption (Fernet + PBKDF2)
+│   ├── crypto.py                 # Config field encryption/decryption (Fernet + PBKDF2) + DB key derivation
 │   └── templates/
 │       ├── index.html            # Web UI single-page application
 │       └── marked.min.js         # Markdown rendering library for web UI
@@ -91,9 +93,11 @@ matrix/
 │   ├── matrix_base.py            # MatrixBackend — shared Matrix client logic (auth, sync, media, keys)
 │   ├── matrix_source.py          # MatrixSourceBackend — monitors all rooms, emits FORWARD/EDIT/REDACT
 │   └── matrix_target.py          # MatrixTargetBackend — aggregation room, reply-to, control commands
-└── store/                        # Runtime E2EE key storage (auto-created)
-    ├── source/                   # Olm/Megolm keys for Server A connection
-    └── target/                   # Olm/Megolm keys for Server B connection
+├── store/                        # Runtime E2EE key storage (auto-created)
+│   ├── source/                   # Olm/Megolm keys for Server A connection
+│   └── target/                   # Olm/Megolm keys for Server B connection
+├── messages.db                   # Encrypted SQLite database (messages + state)
+└── messages.db.salt              # Salt for DB encryption key derivation
 ```
 
 ---
@@ -521,34 +525,41 @@ Both are persisted in `state.json` and evicted on FIFO basis.
 
 ### 3.7 `bridge/state.py` — State Persistence
 
-**Storage format:** JSON file (`state.json`)
+**Storage format:** SQLite tables within the same encrypted `messages.db` database.
 
-```json
-{
-  "sync_tokens": {
-    "source": "s3_12345_abc",
-    "target": "s3_67890_def"
-  },
-  "processed_events": ["$event1", "$event2"],
-  "forwarding_enabled": true,
-  "forwarding_paused": false,
-  "event_room_map": {"$target_event1": "!room:a.com"},
-  "source_target_map": {"$source_event1": "$target_event1"},
-  "failed_decryptions": {
-    "session_id": [{"room_id": "...", "event_id": "..."}]
-  }
-}
-```
+Previously stored in `state.json`; on first run, existing JSON is automatically migrated to SQLite and the file is deleted.
 
-**Operations:**
+#### Database Tables
+
+| Table | Primary Key | Purpose |
+|-------|-------------|---------|
+| `state_processed_events` | `event_id` | Event deduplication |
+| `state_event_room_map` | `event_id` | Target event → source room mapping |
+| `state_source_target_map` | `source_event_id` | Source event → target event mapping |
+| `state_failed_decryptions` | `(session_id, event_id)` | Failed decryption tracking |
+
+Sync tokens and forwarding state are stored in the `bridge_config` table with keys:
+- `sync_token:<backend_name>` — sync batch tokens
+- `forwarding_enabled` — `"1"` or `"0"`
+- `forwarding_paused` — `"1"` or `"0"`
+
+#### JSON Migration
+
+On startup, `StateManager.load()` checks for `state.json`:
+1. Reads all data from the JSON file
+2. Inserts into corresponding SQLite tables
+3. Deletes the JSON file
+4. Subsequent starts load directly from SQLite
+
+#### Operations
 
 | Method | Description |
 |--------|-------------|
-| `load()` | Read state.json on startup |
-| `save_sync_token(backend, token)` | Store sync batch token per backend |
-| `load_sync_token(backend)` | Restore sync position after restart |
-| `is_processed(event_id)` | Check if event was already handled |
-| `mark_processed(event_id)` | Record event to prevent duplicate processing |
+| `load()` | Load state from SQLite; migrate from JSON if present |
+| `save_sync_token(backend, token)` | Store sync batch token in `bridge_config` |
+| `load_sync_token(backend)` | Restore sync position |
+| `is_processed(event_id)` | Check in-memory set (loaded from SQLite) |
+| `mark_processed(event_id)` | Insert into SQLite + in-memory set |
 | `save_event_room(event_id, room_id)` | Map target event → source room |
 | `get_event_room(event_id)` | Look up source room for a target event |
 | `save_source_target(source_id, target_id)` | Map source event → target event |
@@ -556,12 +567,12 @@ Both are persisted in `state.json` and evicted on FIFO basis.
 | `pop_source_target(source_id)` | Remove and return a mapping |
 | `clear_mappings()` | Clear all event maps (on logout) |
 | `get_forwarding_enabled()` | Get forwarding state |
-| `set_forwarding_enabled(bool)` | Set forwarding state |
+| `set_forwarding_enabled(bool)` | Set forwarding state in `bridge_config` |
 | `get_forwarding_paused()` | Get pause state |
-| `set_forwarding_paused(bool)` | Set pause state |
-| `save_failed_decryption(session_id, room_id, event_id)` | Persist failed decryption for cross-restart retry |
+| `set_forwarding_paused(bool)` | Set pause state in `bridge_config` |
+| `save_failed_decryption(session_id, room_id, event_id)` | Persist failed decryption |
 | `pop_failed_decryptions(session_id)` | Retrieve and remove persisted failures |
-| `flush()` | Write state to disk (if dirty) |
+| `flush()` | No-op (writes are immediate to SQLite) |
 
 **Eviction policies:**
 - `processed_events`: 10,000 entries (FIFO)
@@ -569,13 +580,26 @@ Both are persisted in `state.json` and evicted on FIFO basis.
 - `source_target_map`: 5,000 entries (FIFO)
 - `failed_decryptions`: 500 total entries across all sessions
 
-**Flush timing:** State is flushed to disk every 60 seconds (periodic task) and on graceful shutdown. File is written atomically (temp file + `os.replace`) with owner-only permissions.
+**Write behavior:** All writes are immediate (no periodic flush needed). `flush()` is a no-op kept for backward compatibility.
 
 ---
 
-### 3.8 `bridge/message_store.py` — SQLite Message Persistence
+### 3.8 `bridge/message_store.py` — SQLCipher-Encrypted Message Persistence
 
-Peewee ORM-based message store with full-text search, alias management, and media file storage.
+Peewee ORM-based message store with full-text search, alias management, media file storage, and **SQLCipher encryption**.
+
+#### Database Encryption
+
+The database is encrypted using SQLCipher via `pysqlcipher3`:
+
+| Component | Description |
+|-----------|-------------|
+| `_EncryptedSqliteDatabase` | Custom Peewee `SqliteDatabase` subclass wrapping `pysqlcipher3` |
+| `derive_db_key()` | Derives 64-char hex key from master password + salt (PBKDF2-HMAC-SHA256, 600K iterations) |
+| `messages.db.salt` | 16-byte random salt file, auto-generated on first run |
+| Plaintext migration | Detects unencrypted SQLite header, copies data to encrypted DB, keeps backup at `messages.db.plaintext.bak` |
+
+If `db_password` is not provided to `MessageStore`, a plain unencrypted SQLite database is used (backward compatible, but not recommended).
 
 #### Database Schema
 
@@ -605,11 +629,19 @@ Peewee ORM-based message store with full-text search, alias management, and medi
 | `media_local_path` | CharField | Relative path within media_dir |
 | `edit_of_event_id` | CharField (Indexed) | References the original event |
 
-**`bridge_config` table:** Key-value store for internal state (e.g., `web_secret`, `migrated_aliases_v1`).
+**`bridge_config` table:** Key-value store for internal state (e.g., `web_secret`, `migrated_aliases_v1`, `sync_token:*`, `forwarding_enabled`, `forwarding_paused`).
 
 **`user_aliases` table:** Maps `sender_id` (PK) → `displayname`.
 
 **`room_aliases` table:** Maps `room_id` (PK) → `room_name`.
+
+**`state_processed_events` table:** Maps `event_id` (PK) for event deduplication.
+
+**`state_event_room_map` table:** Maps `event_id` (PK) → `room_id` for target event → source room resolution.
+
+**`state_source_target_map` table:** Maps `source_event_id` (PK) → `target_event_id` for edit/redaction forwarding.
+
+**`state_failed_decryptions` table:** Tracks `(session_id, room_id, event_id)` for pending decryption retries.
 
 **`messages_fts` virtual table:** FTS5 full-text index on `text`, kept in sync via INSERT/DELETE/UPDATE triggers.
 
@@ -617,6 +649,7 @@ Peewee ORM-based message store with full-text search, alias management, and medi
 
 - `journal_mode = wal` (Write-Ahead Logging)
 - `busy_timeout = 5000` (5 second lock timeout)
+- SQLCipher: `cipher_page_size = 4096`, `cipher_kdf_iter = 256000`, `cipher_hmac_algorithm = HMAC_SHA256`, `cipher_kdf_algorithm = PBKDF2_HMAC_SHA512`
 
 #### Key Features
 
@@ -674,22 +707,28 @@ An aiohttp-based HTTP server providing a searchable web interface for the messag
 
 ---
 
-### 3.10 `bridge/crypto.py` — Config Field Encryption
+### 3.10 `bridge/crypto.py` — Config Field Encryption & DB Key Derivation
 
-Symmetric encryption for sensitive config values (access tokens, passwords, key passphrases).
+Symmetric encryption for sensitive config values (access tokens, passwords, key passphrases) and database encryption key derivation.
 
 | Function | Description |
 |----------|-------------|
 | `encrypt(plaintext, master_password)` | Encrypt a value, returns `enc:...` prefixed string |
 | `decrypt(encrypted_value, master_password)` | Decrypt an `enc:...` value |
 | `is_encrypted(value)` | Check if a value starts with `enc:` prefix |
-| `decrypt_config(config, master_password)` | Walk source/target sections, decrypt all encrypted fields |
+| `decrypt_config(config, master_password)` | Walk source/target sections + web.password, decrypt all encrypted fields |
+| `derive_db_key(master_password, salt)` | Derive 64-char hex key for SQLCipher from master password + salt |
 
-**Encryption details:**
+**Config encryption details:**
 - Algorithm: Fernet (AES-128-CBC with HMAC-SHA256 for authentication)
 - Key derivation: PBKDF2-HMAC-SHA256, 600,000 iterations, 16-byte random salt
 - Encrypted values prefixed with `enc:` for easy identification
-- Supported fields: `access_token`, `password`, `key_import_passphrase`
+- Supported fields: `access_token`, `password`, `key_import_passphrase`, `web.password`
+
+**Database key derivation:**
+- Algorithm: PBKDF2-HMAC-SHA256, 600,000 iterations
+- Salt: 16-byte random value stored in `messages.db.salt`
+- Output: 64-character hex string used as SQLCipher PRAGMA key
 
 ---
 
@@ -698,25 +737,25 @@ Symmetric encryption for sensitive config values (access tokens, passwords, key 
 ```
 1. Load config.yaml
 2. Setup logging (stdout or rotating file)
-3. Check for encrypted fields (enc: prefix)
-   └─ Read MXBIRDGE_MASTER_KEY env var, or prompt for master password, call decrypt_config()
-4. Interactive credential setup (if access_token missing)
+3. Prompt for master password (required, or use MXBIRDGE_MASTER_KEY env)
+4. Decrypt encrypted config fields (enc: prefix)
+5. Auto-encrypt plaintext credentials if found
+6. Interactive credential setup (if access_token missing)
    ├─ Login with password via _matrix_login()
-   ├─ Read MXBIRDGE_MASTER_KEY env var, or prompt for master password (with confirmation)
    ├─ Encrypt token with master password
    ├─ Write back to config.yaml
    └─ Optional: import encryption keys
-5. Initialize StateManager, load persisted state
-6. Determine mode: bridge (has target) or backup (no target)
-7. Initialize MessageStore (if message_store.enabled)
-8. Create backends:
+7. Initialize StateManager, load persisted state from SQLite (migrate from JSON if present)
+8. Determine mode: bridge (has target) or backup (no target)
+9. Initialize MessageStore (encrypted with SQLCipher using derived master key)
+10. Create backends:
    ├─ MatrixSourceBackend (always)
    └─ MatrixTargetBackend (bridge mode only)
-9. Create BridgeCore
-10. Start WebServer (if web.enabled and message_store active)
-11. Register SIGINT/SIGTERM handlers
-12. asyncio.run() — start bridge + web server
-13. On signal: cancel bridge task → stop backends → stop web → flush state → close DB → exit
+11. Create BridgeCore
+12. Start WebServer (if web.enabled and message_store active)
+13. Register SIGINT/SIGTERM handlers
+14. asyncio.run() — start bridge + web server
+15. On signal: cancel bridge task → stop backends → stop web → flush state → close DB → exit
 ```
 
 #### Interactive Credential Setup
@@ -1003,6 +1042,8 @@ No changes needed to `BridgeCore`, `BridgeMessage`, or `MessageStore`.
 
 ## 8. Configuration Schema
 
+> **Note:** The master password is always required at startup (via `MXBIRDGE_MASTER_KEY` env var or interactive prompt). It is used for config field decryption and database encryption key derivation. Plaintext credentials in the config file are automatically encrypted on first run.
+
 ```yaml
 logging:
   level: string                    # DEBUG | INFO | WARNING | ERROR
@@ -1068,6 +1109,7 @@ bridge:
 | `cryptography` | >= 42.0 | Fernet encryption for config field encryption |
 | `aiohttp` | >= 3.9.0 | HTTP server for web search interface |
 | `peewee` | >= 3.17.0 | SQLite ORM for message persistence |
+| `pysqlcipher3` | >= 1.2.0 | SQLCipher binding for encrypted database |
 
 ### matrix-nio sub-dependencies for E2EE
 

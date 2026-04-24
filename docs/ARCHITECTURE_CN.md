@@ -51,6 +51,8 @@
 - **桥接模式**（默认）：从源服务器转发消息到目标服务器，支持反向回复和控制命令。
 - **备份模式**：当配置中缺少 `target` 段时，将所有消息和媒体保存到本地 SQLite 存储，不进行转发。
 
+所有持久化状态（同步令牌、事件映射、已处理事件、失败的解密）和消息都存储在单个**加密 SQLite 数据库**（`messages.db`）中，使用 SQLCipher 加密。加密密钥通过 PBKDF2-HMAC-SHA256 从主密码派生。盐文件（`messages.db.salt`）确保数据库密钥在每个安装中唯一。
+
 ---
 
 ## 2. 项目结构
@@ -76,10 +78,10 @@ matrix/
 │   ├── __init__.py
 │   ├── models.py                 # BridgeMessage 数据类 — 统一的跨后端消息模型
 │   ├── core.py                   # BridgeCore — 消息路由、备份模式、控制命令
-│   ├── state.py                  # StateManager — 同步令牌、事件去重、转发状态、事件映射
-│   ├── message_store.py          # MessageStore — 基于 SQLite 的消息持久化（含 FTS5）
+│   ├── state.py                  # StateManager — 同步令牌、事件去重、转发状态、事件映射（SQLite 支持）
+│   ├── message_store.py          # MessageStore — SQLCipher 加密的 SQLite（含 FTS5 + 状态表）
 │   ├── web.py                    # WebServer — aiohttp HTTP API，用于消息搜索和浏览
-│   ├── crypto.py                 # 配置字段加密/解密（Fernet + PBKDF2）
+│   ├── crypto.py                 # 配置字段加密/解密（Fernet + PBKDF2）+ 数据库密钥派生
 │   └── templates/
 │       ├── index.html            # Web UI 单页应用
 │       └── marked.min.js         # Markdown 渲染库
@@ -89,9 +91,11 @@ matrix/
 │   ├── matrix_base.py            # MatrixBackend — 共享的 Matrix 客户端逻辑（认证、同步、媒体、密钥）
 │   ├── matrix_source.py          # MatrixSourceBackend — 监控所有房间，发送 FORWARD/EDIT/REDACT
 │   └── matrix_target.py          # MatrixTargetBackend — 聚合房间、回复、控制命令
-└── store/                        # 运行时 E2EE 密钥存储（自动创建）
-    ├── source/                   # 服务器 A 连接的 Olm/Megolm 密钥
-    └── target/                   # 服务器 B 连接的 Olm/Megolm 密钥
+├── store/                        # 运行时 E2EE 密钥存储（自动创建）
+│   ├── source/                   # 服务器 A 连接的 Olm/Megolm 密钥
+│   └── target/                   # 服务器 B 连接的 Olm/Megolm 密钥
+├── messages.db                   # 加密的 SQLite 数据库（消息 + 状态）
+└── messages.db.salt              # 数据库加密密钥派生的盐文件
 ```
 
 ---
@@ -519,34 +523,41 @@ class BridgeCore:
 
 ### 3.7 `bridge/state.py` — 状态持久化
 
-**存储格式：** JSON 文件（`state.json`）
+**存储格式：** 同一加密 `messages.db` 数据库中的 SQLite 表。
 
-```json
-{
-  "sync_tokens": {
-    "source": "s3_12345_abc",
-    "target": "s3_67890_def"
-  },
-  "processed_events": ["$event1", "$event2"],
-  "forwarding_enabled": true,
-  "forwarding_paused": false,
-  "event_room_map": {"$target_event1": "!room:a.com"},
-  "source_target_map": {"$source_event1": "$target_event1"},
-  "failed_decryptions": {
-    "session_id": [{"room_id": "...", "event_id": "..."}]
-  }
-}
-```
+以前存储在 `state.json` 中；首次运行时，现有 JSON 会自动迁移到 SQLite 并删除文件。
 
-**操作：**
+#### 数据库表
+
+| 表 | 主键 | 用途 |
+|---|------|------|
+| `state_processed_events` | `event_id` | 事件去重 |
+| `state_event_room_map` | `event_id` | 目标事件 → 源房间映射 |
+| `state_source_target_map` | `source_event_id` | 源事件 → 目标事件映射 |
+| `state_failed_decryptions` | `(session_id, event_id)` | 失败的解密追踪 |
+
+同步令牌和转发状态存储在 `bridge_config` 表中，键为：
+- `sync_token:<backend_name>` — 同步批次令牌
+- `forwarding_enabled` — `"1"` 或 `"0"`
+- `forwarding_paused` — `"1"` 或 `"0"`
+
+#### JSON 迁移
+
+启动时，`StateManager.load()` 检查 `state.json`：
+1. 读取 JSON 文件中的所有数据
+2. 插入到对应的 SQLite 表中
+3. 删除 JSON 文件
+4. 后续启动直接从 SQLite 加载
+
+#### 操作
 
 | 方法 | 描述 |
 |------|------|
-| `load()` | 启动时读取 state.json |
-| `save_sync_token(backend, token)` | 存储每个后端的同步批次令牌 |
-| `load_sync_token(backend)` | 重启后恢复同步位置 |
-| `is_processed(event_id)` | 检查事件是否已处理 |
-| `mark_processed(event_id)` | 记录事件以防重复处理 |
+| `load()` | 从 SQLite 加载状态；如果存在 JSON 则迁移 |
+| `save_sync_token(backend, token)` | 在 `bridge_config` 中存储同步批次令牌 |
+| `load_sync_token(backend)` | 恢复同步位置 |
+| `is_processed(event_id)` | 检查内存集合（从 SQLite 加载） |
+| `mark_processed(event_id)` | 插入 SQLite + 内存集合 |
 | `save_event_room(event_id, room_id)` | 映射目标事件 → 源房间 |
 | `get_event_room(event_id)` | 查找目标事件的源房间 |
 | `save_source_target(source_id, target_id)` | 映射源事件 → 目标事件 |
@@ -554,12 +565,12 @@ class BridgeCore:
 | `pop_source_target(source_id)` | 移除并返回映射 |
 | `clear_mappings()` | 清除所有事件映射（登出时） |
 | `get_forwarding_enabled()` | 获取转发状态 |
-| `set_forwarding_enabled(bool)` | 设置转发状态 |
+| `set_forwarding_enabled(bool)` | 在 `bridge_config` 中设置转发状态 |
 | `get_forwarding_paused()` | 获取暂停状态 |
-| `set_forwarding_paused(bool)` | 设置暂停状态 |
-| `save_failed_decryption(session_id, room_id, event_id)` | 持久化失败的解密以供跨重启重试 |
+| `set_forwarding_paused(bool)` | 在 `bridge_config` 中设置暂停状态 |
+| `save_failed_decryption(session_id, room_id, event_id)` | 持久化失败的解密 |
 | `pop_failed_decryptions(session_id)` | 检索并移除持久化的失败记录 |
-| `flush()` | 将状态写入磁盘（如果有变更） |
+| `flush()` | 空操作（写入立即到 SQLite） |
 
 **淘汰策略：**
 - `processed_events`：10,000 条（FIFO）
@@ -567,13 +578,26 @@ class BridgeCore:
 - `source_target_map`：5,000 条（FIFO）
 - `failed_decryptions`：所有会话总计 500 条
 
-**刷新时机：** 状态每 60 秒刷新到磁盘（周期性任务）和优雅关闭时。文件以原子方式写入（临时文件 + `os.replace`），仅限所有者权限。
+**写入行为：** 所有写入都是即时的（无需定期刷新）。`flush()` 是为了向后兼容而保留的空操作。
 
 ---
 
-### 3.8 `bridge/message_store.py` — SQLite 消息持久化
+### 3.8 `bridge/message_store.py` — SQLCipher 加密消息持久化
 
-基于 Peewee ORM 的消息存储，支持全文搜索、别名管理和媒体文件存储。
+基于 Peewee ORM 的消息存储，支持全文搜索、别名管理、媒体文件存储和 **SQLCipher 加密**。
+
+#### 数据库加密
+
+数据库通过 `pysqlcipher3` 使用 SQLCipher 加密：
+
+| 组件 | 描述 |
+|------|------|
+| `_EncryptedSqliteDatabase` | 自定义 Peewee `SqliteDatabase` 子类，封装 `pysqlcipher3` |
+| `derive_db_key()` | 从主密码 + 盐派生 64 字符十六进制密钥（PBKDF2-HMAC-SHA256，60 万次迭代） |
+| `messages.db.salt` | 16 字节随机盐文件，首次运行自动生成 |
+| 明文迁移 | 检测未加密的 SQLite 头部，将数据复制到加密数据库，备份保留在 `messages.db.plaintext.bak` |
+
+如果未向 `MessageStore` 提供 `db_password`，则使用普通的未加密 SQLite 数据库（向后兼容，但不推荐）。
 
 #### 数据库 Schema
 
@@ -603,11 +627,19 @@ class BridgeCore:
 | `media_local_path` | CharField | media_dir 内的相对路径 |
 | `edit_of_event_id` | CharField (Indexed) | 引用原始事件 |
 
-**`bridge_config` 表：** 内部状态的键值存储（例如 `web_secret`、`migrated_aliases_v1`）。
+**`bridge_config` 表：** 内部状态的键值存储（例如 `web_secret`、`migrated_aliases_v1`、`sync_token:*`、`forwarding_enabled`、`forwarding_paused`）。
 
 **`user_aliases` 表：** 映射 `sender_id` (PK) → `displayname`。
 
 **`room_aliases` 表：** 映射 `room_id` (PK) → `room_name`。
+
+**`state_processed_events` 表：** 映射 `event_id` (PK) 用于事件去重。
+
+**`state_event_room_map` 表：** 映射 `event_id` (PK) → `room_id` 用于目标事件 → 源房间解析。
+
+**`state_source_target_map` 表：** 映射 `source_event_id` (PK) → `target_event_id` 用于编辑/撤回转发。
+
+**`state_failed_decryptions` 表：** 追踪 `(session_id, room_id, event_id)` 用于待处理的解密重试。
 
 **`messages_fts` 虚拟表：** `text` 列的 FTS5 全文索引，通过 INSERT/DELETE/UPDATE 触发器同步。
 
@@ -615,6 +647,7 @@ class BridgeCore:
 
 - `journal_mode = wal`（预写式日志）
 - `busy_timeout = 5000`（5 秒锁超时）
+- SQLCipher：`cipher_page_size = 4096`、`cipher_kdf_iter = 256000`、`cipher_hmac_algorithm = HMAC_SHA256`、`cipher_kdf_algorithm = PBKDF2_HMAC_SHA512`
 
 #### 关键特性
 
@@ -672,22 +705,28 @@ class BridgeCore:
 
 ---
 
-### 3.10 `bridge/crypto.py` — 配置字段加密
+### 3.10 `bridge/crypto.py` — 配置字段加密与数据库密钥派生
 
-用于敏感配置值（访问令牌、密码、密钥口令）的对称加密。
+用于敏感配置值（访问令牌、密码、密钥口令）的对称加密以及数据库加密密钥派生。
 
 | 函数 | 描述 |
 |------|------|
 | `encrypt(plaintext, master_password)` | 加密值，返回 `enc:...` 前缀的字符串 |
 | `decrypt(encrypted_value, master_password)` | 解密 `enc:...` 值 |
 | `is_encrypted(value)` | 检查值是否以 `enc:` 前缀开头 |
-| `decrypt_config(config, master_password)` | 遍历 source/target 段，解密所有加密字段 |
+| `decrypt_config(config, master_password)` | 遍历 source/target 段 + web.password，解密所有加密字段 |
+| `derive_db_key(master_password, salt)` | 从主密码 + 盐派生用于 SQLCipher 的 64 字符十六进制密钥 |
 
-**加密细节：**
+**配置加密细节：**
 - 算法：Fernet（AES-128-CBC，带 HMAC-SHA256 认证）
 - 密钥派生：PBKDF2-HMAC-SHA256，600,000 次迭代，16 字节随机盐
 - 加密值以 `enc:` 前缀标识
-- 支持的字段：`access_token`、`password`、`key_import_passphrase`
+- 支持的字段：`access_token`、`password`、`key_import_passphrase`、`web.password`
+
+**数据库密钥派生：**
+- 算法：PBKDF2-HMAC-SHA256，600,000 次迭代
+- 盐：16 字节随机值，存储在 `messages.db.salt` 中
+- 输出：64 字符十六进制字符串，用作 SQLCipher PRAGMA key
 
 ---
 
@@ -696,24 +735,25 @@ class BridgeCore:
 ```
 1. 加载 config.yaml
 2. 设置日志（stdout 或轮转文件）
-3. 检查加密字段（enc: 前缀）
-   └─ 提示输入主密码，调用 decrypt_config()
-4. 交互式凭据设置（如果缺少 access_token）
+3. 提示输入主密码（必需，或使用 MXBIRDGE_MASTER_KEY 环境变量）
+4. 解密加密的配置字段（enc: 前缀）
+5. 自动加密发现的明文凭据
+6. 交互式凭据设置（如果缺少 access_token）
    ├─ 通过 _matrix_login() 使用密码登录
    ├─ 用主密码加密令牌
    ├─ 写回 config.yaml
    └─ 可选：导入加密密钥
-5. 初始化 StateManager，加载持久化状态
-6. 确定模式：桥接（有 target）或备份（无 target）
-7. 初始化 MessageStore（如果 message_store.enabled）
-8. 创建后端：
+7. 初始化 StateManager，从 SQLite 加载持久化状态（如果存在 JSON 则迁移）
+8. 确定模式：桥接（有 target）或备份（无 target）
+9. 初始化 MessageStore（使用派生的主密钥通过 SQLCipher 加密）
+10. 创建后端：
    ├─ MatrixSourceBackend（始终创建）
    └─ MatrixTargetBackend（仅桥接模式）
-9. 创建 BridgeCore
-10. 启动 WebServer（如果 web.enabled 且 message_store 激活）
-11. 注册 SIGINT/SIGTERM 处理器
-12. asyncio.run() — 启动桥接 + Web 服务器
-13. 信号触发：取消桥接任务 → 停止后端 → 停止 Web → 刷新状态 → 关闭 DB → 退出
+11. 创建 BridgeCore
+12. 启动 WebServer（如果 web.enabled 且 message_store 激活）
+13. 注册 SIGINT/SIGTERM 处理器
+14. asyncio.run() — 启动桥接 + Web 服务器
+15. 信号触发：取消桥接任务 → 停止后端 → 停止 Web → 刷新状态 → 关闭 DB → 退出
 ```
 
 #### 交互式凭据设置
@@ -1000,6 +1040,8 @@ class TelegramBackend(BaseBackend):
 
 ## 8. 配置 Schema
 
+> **注意：** 主密码在启动时始终需要（通过 `MXBIRDGE_MASTER_KEY` 环境变量或交互式提示）。它用于配置字段解密和数据库加密密钥派生。配置文件中的明文凭据会在首次运行时自动加密。
+
 ```yaml
 logging:
   level: string                    # DEBUG | INFO | WARNING | ERROR
@@ -1065,6 +1107,7 @@ bridge:
 | `cryptography` | >= 42.0 | 配置字段加密的 Fernet 加密 |
 | `aiohttp` | >= 3.9.0 | Web 搜索界面的 HTTP 服务器 |
 | `peewee` | >= 3.17.0 | 消息持久化的 SQLite ORM |
+| `pysqlcipher3` | >= 1.2.0 | SQLCipher 绑定，用于数据库加密 |
 
 ### E2EE 的 matrix-nio 子依赖
 
