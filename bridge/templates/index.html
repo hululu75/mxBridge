@@ -909,14 +909,17 @@ function collectDisplayNames(msgs) {
 marked.setOptions({ breaks: true, gfm: true, html: false });
 function renderMd(text, senderDn) {
   if (!text) return '';
-  let h = marked.parse(text);
-  h = h.replace(/(?<![<\w\/])@(\S+)/g, '<span class="mention">@$1</span>');
-  if (allDisplayNames.length) {
-    for (const dn of allDisplayNames) {
-      if (dn === senderDn) continue;
-      const escaped = dn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      h = h.replace(new RegExp('(?<![<\\w\\/])(' + escaped + ')(?![^<]*</)', 'g'), '<span class="mention">$1</span>');
-    }
+  const names = allDisplayNames.filter(dn => dn !== senderDn);
+  const phs = [];
+  let t = text;
+  t = t.replace(/(^|\s)@(\S+)/g, (m, p, n) => { const i = phs.length; phs.push('@' + n); return p + '\x00M' + i + '\x00'; });
+  for (const dn of names) {
+    const re = new RegExp(dn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    t = t.replace(re, (m) => { const i = phs.length; phs.push(m); return '\x00M' + i + '\x00'; });
+  }
+  let h = marked.parse(t);
+  for (let i = 0; i < phs.length; i++) {
+    h = h.replace('\x00M' + i + '\x00', '<span class="mention">' + esc(phs[i]) + '</span>');
   }
   return h;
 }
