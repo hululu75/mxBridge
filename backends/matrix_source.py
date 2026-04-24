@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Optional
 
@@ -60,12 +61,6 @@ class MatrixSourceBackend(MatrixBackend):
             client.next_batch = saved_token
             logger.info("[%s] Resumed from sync token", self.name)
 
-        resp = await client.sync(timeout=3000, full_state=True)
-        if isinstance(resp, SyncResponse):
-            logger.info("[%s] Initial sync done", self.name)
-            if resp.next_batch:
-                await self._state.save_sync_token(self.name, resp.next_batch)
-
         client.add_event_callback(
             self._on_room_event,
             (RoomMessage, CallInviteEvent, CallAnswerEvent, CallHangupEvent),
@@ -73,6 +68,12 @@ class MatrixSourceBackend(MatrixBackend):
         client.add_event_callback(self._on_encrypted_event, MegolmEvent)
         client.add_event_callback(self._on_redaction_event, RedactionEvent)
         self._register_common_callbacks(client)
+
+        resp = await client.sync(timeout=3000, full_state=True)
+        if isinstance(resp, SyncResponse):
+            logger.info("[%s] Initial sync done", self.name)
+            if resp.next_batch:
+                await self._state.save_sync_token(self.name, resp.next_batch)
 
         if client.should_query_keys:
             await client.keys_query()
@@ -315,6 +316,36 @@ class MatrixSourceBackend(MatrixBackend):
 
     # -------------------------------------------------- message handlers
 
+    MENTION_START = "\x02"
+    MENTION_END = "\x03"
+
+    @staticmethod
+    def _enrich_mentions(body: str, content: dict, displayname_map: dict | None = None) -> str:
+        names_to_prefix: list[str] = []
+        fmt = content.get("formatted_body", "")
+        if fmt:
+            for mxid, displayname in re.findall(
+                r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
+            ):
+                names_to_prefix.append(displayname)
+        if not names_to_prefix:
+            m_mentions = content.get("m.mentions")
+            if isinstance(m_mentions, dict):
+                for uid in m_mentions.get("user_ids", []):
+                    dn = (displayname_map or {}).get(uid)
+                    if dn and dn in body:
+                        names_to_prefix.append(dn)
+        if not names_to_prefix:
+            return body
+        ms = MatrixSourceBackend.MENTION_START
+        me = MatrixSourceBackend.MENTION_END
+        text = body
+        for name in names_to_prefix:
+            marker = f"{ms}{name}{me}"
+            if marker not in text and name in text:
+                text = text.replace(name, marker, 1)
+        return text
+
     async def _handle_text(
         self,
         room: MatrixRoom,
@@ -327,11 +358,13 @@ class MatrixSourceBackend(MatrixBackend):
         content = source.get("content", {}) if isinstance(source, dict) else {}
         relates_to = content.get("m.relates_to", {})
         new_content = content.get("m.new_content")
+        dn_map = {u_id: u.display_name for u_id, u in room.users.items() if u.display_name}
 
         if relates_to.get("rel_type") == "m.replace" and new_content and isinstance(new_content, dict):
             edited_text = new_content.get("body", "")
             if not edited_text:
                 edited_text = (event.body or "").lstrip("* ")
+            edited_text = self._enrich_mentions(edited_text, new_content, dn_map)
             msg = BridgeMessage(
                 source_room_id=room.room_id,
                 source_room_name=await self._get_room_name(room),
@@ -354,7 +387,7 @@ class MatrixSourceBackend(MatrixBackend):
             source_room_name=await self._get_room_name(room),
             sender=event.sender,
             sender_displayname=await self._get_sender_displayname(room, event.sender),
-            text=event.body or "",
+            text=self._enrich_mentions(event.body or "", content, dn_map),
             timestamp=event.server_timestamp,
             event_id=original_event_id or event.event_id,
             backend_name=self.name,

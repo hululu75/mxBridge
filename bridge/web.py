@@ -271,7 +271,7 @@ class WebServer:
     async def _run_backfill(self, source_config: dict, bridge_config: dict,
                             store_cfg: dict, days: int, no_media: bool,
                             clear_before: bool) -> None:
-        from backfill import _init_client, backfill_room, _get_room_name
+        from scripts.backfill import _init_client, backfill_room, _get_room_name
         client = None
         try:
             if clear_before:

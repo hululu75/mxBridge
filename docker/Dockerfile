@@ -1,6 +1,6 @@
 FROM python:3.12-alpine AS builder
 
-RUN apk add --no-cache build-base libffi-dev openssl-dev
+RUN apk add --no-cache build-base libffi-dev openssl-dev sqlcipher-dev
 
 WORKDIR /install
 
@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir --prefix=/install/deps -r requirements.txt
 
 FROM python:3.12-alpine
 
-RUN apk add --no-cache libffi openssl
+RUN apk add --no-cache libffi openssl sqlcipher-libs
 
 WORKDIR /app
 

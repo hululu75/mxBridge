@@ -6,6 +6,13 @@
 # Backup mode: save all messages + media to local storage without forwarding.
 #   Remove the "target" section entirely and enable message_store.
 #   The bot joins rooms on a single server and records everything it sees.
+#
+# SECURITY: A master password is always required on startup.
+#   - Set via MXBIRDGE_MASTER_KEY environment variable, or enter interactively.
+#   - Used to encrypt access_token, password, key_import_passphrase in this file.
+#   - Used to derive the database encryption key (SQLCipher) for messages.db.
+#   - Plaintext credentials in this file will be auto-encrypted on first run.
+#   - The config file MUST be writable by the bridge process.
 
 logging:
   level: INFO

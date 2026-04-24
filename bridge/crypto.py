@@ -11,6 +11,9 @@ ENC_PREFIX = "enc:"
 PBKDF2_ITERATIONS = 600_000
 SALT_SIZE = 16
 
+DB_KEY_SALT_SIZE = 16
+DB_KEY_ITERATIONS = 600_000
+
 
 def _derive_key(master_password: str, salt: bytes) -> bytes:
     dk = hashlib.pbkdf2_hmac(
@@ -60,6 +63,16 @@ def is_encrypted(value: str) -> bool:
     return isinstance(value, str) and value.startswith(ENC_PREFIX)
 
 
+def derive_db_key(master_password: str, salt: bytes) -> str:
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        master_password.encode("utf-8"),
+        salt,
+        DB_KEY_ITERATIONS,
+    )
+    return dk.hex()
+
+
 def decrypt_config(config: dict, master_password: str) -> dict:
     encrypted_fields = ("access_token", "password", "key_import_passphrase")
 
@@ -76,5 +89,14 @@ def decrypt_config(config: dict, master_password: str) -> dict:
                         f"Failed to decrypt {section_key}.{field}. Wrong master password?"
                     )
                 section[field] = decrypted
+
+    web_section = config.get("bridge", {}).get("web", {})
+    if isinstance(web_section, dict):
+        value = web_section.get("password", "")
+        if is_encrypted(value):
+            decrypted = decrypt(value, master_password)
+            if decrypted is None:
+                raise ValueError("Failed to decrypt bridge.web.password. Wrong master password?")
+            web_section["password"] = decrypted
 
     return config

@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import getpass
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -95,7 +96,7 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _decrypt_config_if_needed(config: dict) -> dict:
+def _decrypt_config_if_needed(config: dict) -> tuple[dict, str]:
     needs_key = False
     for section_key in ("source", "target"):
         section = config.get(section_key)
@@ -107,10 +108,13 @@ def _decrypt_config_if_needed(config: dict) -> dict:
                 break
         if needs_key:
             break
-    if not needs_key:
-        return config
-    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password to decrypt config: ")
-    return decrypt_config(config, master_key)
+    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password: ")
+    if not master_key:
+        logger.error("Master password is required")
+        sys.exit(1)
+    if needs_key:
+        config = decrypt_config(config, master_key)
+    return config, master_key
 
 
 def _get_room_name(room) -> str:
@@ -224,6 +228,29 @@ async def _init_client(source_config: dict, state: StateManager) -> AsyncClient:
     return client
 
 
+def _enrich_mentions(body: str, content: dict, displayname_map: dict | None = None) -> str:
+    names_to_prefix: list[str] = []
+    fmt = content.get("formatted_body", "")
+    if fmt:
+        for mxid, displayname in re.findall(
+            r'<a\s+href="https?://matrix\.to/#/(@[^"]+)"[^>]*>([^<]+)</a>', fmt
+        ):
+            names_to_prefix.append(displayname)
+    if not names_to_prefix:
+        m_mentions = content.get("m.mentions")
+        if isinstance(m_mentions, dict):
+            for uid in m_mentions.get("user_ids", []):
+                dn = (displayname_map or {}).get(uid)
+                if dn and dn in body:
+                    names_to_prefix.append(dn)
+    if not names_to_prefix:
+        return body
+    text = body
+    for name in names_to_prefix:
+        if name in text and not text.startswith("@"):
+            text = text.replace(name, f"@{name}", 1)
+    return text
+
 def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[BridgeMessage]:
     room_id = room.room_id
     room_name = _get_room_name(room)
@@ -242,6 +269,8 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
     else:
         content = {}
 
+    dn_map = {u_id: u.display_name for u_id, u in room.users.items() if u.display_name}
+
     relates_to = content.get("m.relates_to", {}) if isinstance(content, dict) else {}
     new_content = content.get("m.new_content") if isinstance(content, dict) else None
 
@@ -249,6 +278,7 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
         edited_text = new_content.get("body", "")
         if not edited_text:
             edited_text = (getattr(event, "body", "") or "").lstrip("* ")
+        edited_text = _enrich_mentions(edited_text, new_content, dn_map)
         return BridgeMessage(
             source_room_id=room_id,
             source_room_name=room_name,
@@ -285,6 +315,7 @@ def _parse_event_to_message(room, event, decrypted_body: str = "") -> Optional[B
         msgtype = MessageType.TEXT
 
     text = getattr(event, "body", "") or decrypted_body or ""
+    text = _enrich_mentions(text, content, dn_map)
     media_url = getattr(event, "url", None)
     is_media = isinstance(event, (RoomMessageImage, RoomMessageVideo, RoomMessageAudio, RoomMessageFile, RoomMessageMedia, RoomEncryptedMedia))
     media_filename = getattr(event, "body", "") if (media_url or is_media) else ""
@@ -496,7 +527,7 @@ async def main_async() -> None:
         logger.error("Config file not found: %s", args.config)
         sys.exit(1)
 
-    config = _decrypt_config_if_needed(config)
+    config, master_key = _decrypt_config_if_needed(config)
 
     source_config = config.get("source", {})
     if not source_config.get("homeserver"):
@@ -510,7 +541,11 @@ async def main_async() -> None:
     if not store_cfg.get("enabled", False) and not args.dry_run:
         logger.info("message_store not enabled in config, but continuing for backfill")
 
-    store = MessageStore(store_path, media_dir=store_cfg.get("media_dir", "") if not args.dry_run else "")
+    store = MessageStore(
+        store_path,
+        media_dir=store_cfg.get("media_dir", "") if not args.dry_run else "",
+        db_password=master_key,
+    )
     logger.info("MessageStore opened: %s", store_path)
 
     state = StateManager(bridge_config.get("state_path", "state.json"))

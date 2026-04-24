@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import re
+import stat
 import tempfile
 from datetime import datetime, timezone
 from typing import Optional
 
 import peewee
 
+from bridge.crypto import DB_KEY_SALT_SIZE, derive_db_key
 from bridge.models import BridgeMessage, CallAction, MessageDirection
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})?$")
 ROOMS_LIMIT = 500
 SENDERS_LIMIT = 500
+SQLITE_HEADER = b"SQLite format 3\x00"
 
 db = peewee.DatabaseProxy()
 
@@ -151,26 +153,257 @@ def _validate_date(value: str) -> bool:
     return bool(_DATE_RE.match(value))
 
 
+def _is_plain_sqlite(path: str) -> bool:
+    if not os.path.exists(path) or os.path.getsize(path) < 16:
+        return False
+    try:
+        with open(path, "rb") as f:
+            header = f.read(16)
+        return header == SQLITE_HEADER
+    except OSError:
+        return False
+
+
+class _EncryptedSqliteDatabase(peewee.SqliteDatabase):
+    def __init__(self, path: str, db_key_hex: str, **kwargs):
+        self._cipher_key = db_key_hex
+        super().__init__(path, **kwargs)
+
+    @staticmethod
+    def _get_sqlcipher():
+        try:
+            from sqlcipher3 import dbapi2 as _sqlite3
+            return _sqlite3
+        except ImportError:
+            from pysqlcipher3 import dbapi2 as _sqlite3
+            return _sqlite3
+
+    def _connect(self):
+        _sqlite3 = self._get_sqlcipher()
+        conn = _sqlite3.connect(self.database, timeout=self._timeout,
+                                isolation_level=None, **self.connect_params)
+        conn.execute(f"PRAGMA key = \"x'{self._cipher_key}'\"")
+        conn.execute("PRAGMA cipher_compatibility = 4")
+        conn.execute("PRAGMA cipher_page_size = 4096")
+        conn.execute("PRAGMA cipher_kdf_iter = 256000")
+        conn.execute("PRAGMA cipher_hmac_algorithm = HMAC_SHA256")
+        conn.execute("PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512")
+        try:
+            self._add_conn_hooks(conn)
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+
+def _create_encrypted_db(path: str, db_key: str) -> peewee.SqliteDatabase:
+    return _EncryptedSqliteDatabase(
+        path,
+        db_key_hex=db_key,
+        pragmas={
+            "journal_mode": "wal",
+            "busy_timeout": 5000,
+        },
+    )
+
+
+def _create_plain_db(path: str) -> peewee.SqliteDatabase:
+    return peewee.SqliteDatabase(path, pragmas={
+        "journal_mode": "wal",
+        "busy_timeout": 5000,
+    })
+
+
+def _load_or_create_salt(salt_path: str) -> bytes:
+    if os.path.exists(salt_path):
+        with open(salt_path, "rb") as f:
+            salt = f.read(DB_KEY_SALT_SIZE)
+        if len(salt) == DB_KEY_SALT_SIZE:
+            return salt
+        logger.warning("Salt file %s is corrupted, regenerating", salt_path)
+    else:
+        logger.info("Generating new database encryption salt: %s", salt_path)
+    salt = os.urandom(DB_KEY_SALT_SIZE)
+    salt_dir = os.path.dirname(salt_path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=salt_dir, prefix=".salt_tmp_")
+    try:
+        os.write(fd, salt)
+        os.close(fd)
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(tmp_path, salt_path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return salt
+
+
+ALL_MODELS = [
+    Message, BridgeConfig, UserAlias, RoomAlias,
+    ProcessedEvent, EventRoomMap, SourceTargetMap, FailedDecryption,
+]
+
+
 class MessageStore:
-    def __init__(self, path: str = "messages.db", media_dir: str = ""):
+    def __init__(self, path: str = "messages.db", media_dir: str = "",
+                 db_password: str = ""):
         self._path = path
         self._media_dir = media_dir
         self._fts_available = False
-        self._real_db = peewee.SqliteDatabase(path, pragmas={
-            "journal_mode": "wal",
-            "busy_timeout": 5000,
-        })
+        self._encrypted = bool(db_password)
+
+        if db_password:
+            try:
+                _EncryptedSqliteDatabase._get_sqlcipher()
+            except ImportError:
+                logger.error(
+                    "pysqlcipher3 is required for database encryption. "
+                    "Install with: pip install pysqlcipher3 "
+                    "(requires libsqlcipher-dev on Debian/Ubuntu, "
+                    "sqlcipher-libs on Alpine)",
+                )
+                raise
+
+            salt_path = path + ".salt"
+            salt = _load_or_create_salt(salt_path)
+            db_key = derive_db_key(db_password, salt)
+
+            if os.path.exists(path) and _is_plain_sqlite(path):
+                self._real_db = self._migrate_to_encrypted(path, db_key)
+            else:
+                self._real_db = _create_encrypted_db(path, db_key)
+        else:
+            self._real_db = _create_plain_db(path)
+
         db.initialize(self._real_db)
         db.connect(reuse_if_open=True)
-        db.create_tables(
-            [Message, BridgeConfig, UserAlias, RoomAlias,
-             ProcessedEvent, EventRoomMap, SourceTargetMap, FailedDecryption],
-            safe=True,
-        )
+        db.create_tables(ALL_MODELS, safe=True)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         self._migrate()
         self._ensure_indexes()
         self._init_fts()
         self._init_fts_triggers()
+
+    def _migrate_to_encrypted(self, path: str, db_key: str) -> peewee.SqliteDatabase:
+        logger.info("Detected plaintext database, migrating to encrypted...")
+
+        backup_path = path + ".plaintext.bak"
+        for ext in ("", "-wal", "-shm"):
+            src = path + ext
+            dst = backup_path + ext
+            if os.path.exists(src):
+                os.replace(src, dst)
+                try:
+                    os.chmod(dst, stat.S_IRUSR | stat.S_IWUSR)
+                except OSError:
+                    pass
+
+        backup_db = peewee.SqliteDatabase(backup_path, pragmas={
+            "journal_mode": "wal", "busy_timeout": 5000,
+        })
+        backup_db.connect()
+
+        table_columns = {}
+        row_counts = {}
+        for model in ALL_MODELS:
+            table = model._meta.table_name
+            try:
+                cursor = backup_db.execute_sql(
+                    f"SELECT * FROM [{table}] LIMIT 0"
+                )
+                columns = (
+                    [desc[0] for desc in cursor.description]
+                    if cursor.description else []
+                )
+                if columns:
+                    table_columns[table] = columns
+                count = backup_db.execute_sql(
+                    f"SELECT COUNT(*) FROM [{table}]"
+                ).fetchone()[0]
+                row_counts[table] = count
+            except peewee.OperationalError:
+                table_columns[table] = []
+                row_counts[table] = 0
+
+        enc_db = None
+        try:
+            enc_db = _create_encrypted_db(path, db_key)
+            enc_db.connect()
+            db.initialize(enc_db)
+            db.create_tables(ALL_MODELS, safe=True)
+
+            for table, columns in table_columns.items():
+                if not columns or row_counts.get(table, 0) == 0:
+                    continue
+                placeholders = ", ".join(["?"] * len(columns))
+                cols = ", ".join(f"[{c}]" for c in columns)
+                sql = f"INSERT INTO [{table}] ({cols}) VALUES ({placeholders})"
+
+                cursor = backup_db.execute_sql(f"SELECT * FROM [{table}]")
+                batch_num = 0
+                while True:
+                    batch = cursor.fetchmany(1000)
+                    if not batch:
+                        break
+                    with enc_db.atomic():
+                        for row in batch:
+                            enc_db.execute_sql(sql, row)
+                    batch_num += 1
+                    if batch_num % 10 == 0:
+                        logger.info(
+                            "Migration: %s - %d rows copied",
+                            table, batch_num * 1000,
+                        )
+
+            backup_db.close()
+
+            for table, expected in row_counts.items():
+                if expected == 0:
+                    continue
+                count = enc_db.execute_sql(
+                    f"SELECT COUNT(*) FROM [{table}]"
+                ).fetchone()[0]
+                if count != expected:
+                    raise RuntimeError(
+                        f"Migration verification failed for {table}: "
+                        f"expected {expected} rows, got {count}"
+                    )
+
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+            logger.info(
+                "Database migration completed. Backup kept at %s "
+                "- delete manually after verifying.",
+                backup_path,
+            )
+            return enc_db
+        except Exception:
+            if enc_db:
+                try:
+                    enc_db.close()
+                except Exception:
+                    pass
+            try:
+                backup_db.close()
+            except Exception:
+                pass
+            if os.path.exists(path):
+                for ext in ("", "-wal", "-shm"):
+                    p = path + ext
+                    if os.path.exists(p):
+                        os.remove(p)
+            for ext in ("", "-wal", "-shm"):
+                src = backup_path + ext
+                dst = path + ext
+                if os.path.exists(src):
+                    os.replace(src, dst)
+            logger.error("Database migration failed, reverted to plaintext")
+            raise
 
     def _migrate(self) -> None:
         try:
@@ -681,6 +914,8 @@ class MessageStore:
             return ts.isoformat()
         if isinstance(ts, (int, float)):
             return datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
+        if isinstance(ts, str):
+            return ts.replace(" ", "T")
         return None
 
     def get_stats(self) -> dict:
