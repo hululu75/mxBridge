@@ -337,8 +337,8 @@ class MatrixSourceBackend(MatrixBackend):
                         names_to_prefix.append(dn)
         if not names_to_prefix:
             return body
-        ms = MatrixSource.MENTION_START
-        me = MatrixSource.MENTION_END
+        ms = MatrixSourceBackend.MENTION_START
+        me = MatrixSourceBackend.MENTION_END
         text = body
         for name in names_to_prefix:
             marker = f"{ms}{name}{me}"
