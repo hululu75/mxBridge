@@ -108,7 +108,7 @@ def _decrypt_config_if_needed(config: dict) -> tuple[dict, str]:
                 break
         if needs_key:
             break
-    master_key = os.environ.get("MXBIRDGE_MASTER_KEY") or getpass.getpass("Enter master password: ")
+    master_key = os.environ.get("MXBRIDGE_MASTER_KEY") or getpass.getpass("Enter master password: ")
     if not master_key:
         logger.error("Master password is required")
         sys.exit(1)

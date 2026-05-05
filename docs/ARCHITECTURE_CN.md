@@ -735,7 +735,7 @@ class BridgeCore:
 ```
 1. 加载 config.yaml
 2. 设置日志（stdout 或轮转文件）
-3. 提示输入主密码（必需，或使用 MXBIRDGE_MASTER_KEY 环境变量）
+3. 提示输入主密码（必需，或使用 MXBRIDGE_MASTER_KEY 环境变量）
 4. 解密加密的配置字段（enc: 前缀）
 5. 自动加密发现的明文凭据
 6. 交互式凭据设置（如果缺少 access_token）
@@ -1040,7 +1040,7 @@ class TelegramBackend(BaseBackend):
 
 ## 8. 配置 Schema
 
-> **注意：** 主密码在启动时始终需要（通过 `MXBIRDGE_MASTER_KEY` 环境变量或交互式提示）。它用于配置字段解密和数据库加密密钥派生。配置文件中的明文凭据会在首次运行时自动加密。
+> **注意：** 主密码在启动时始终需要（通过 `MXBRIDGE_MASTER_KEY` 环境变量或交互式提示）。它用于配置字段解密和数据库加密密钥派生。配置文件中的明文凭据会在首次运行时自动加密。
 
 ```yaml
 logging:

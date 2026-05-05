@@ -737,7 +737,7 @@ Symmetric encryption for sensitive config values (access tokens, passwords, key 
 ```
 1. Load config.yaml
 2. Setup logging (stdout or rotating file)
-3. Prompt for master password (required, or use MXBIRDGE_MASTER_KEY env)
+3. Prompt for master password (required, or use MXBRIDGE_MASTER_KEY env)
 4. Decrypt encrypted config fields (enc: prefix)
 5. Auto-encrypt plaintext credentials if found
 6. Interactive credential setup (if access_token missing)
@@ -761,7 +761,7 @@ Symmetric encryption for sensitive config values (access tokens, passwords, key 
 #### Interactive Credential Setup
 
 When `access_token` is missing from a backend section, `setup_credentials()`:
-1. Reads `MXBIRDGE_MASTER_KEY` env var, or prompts for a master password (with confirmation)
+1. Reads `MXBRIDGE_MASTER_KEY` env var, or prompts for a master password (with confirmation)
 2. Logs in with the configured password
 3. Encrypts the received access token with the master password
 4. Writes the encrypted token back to `config.yaml`
@@ -1042,7 +1042,7 @@ No changes needed to `BridgeCore`, `BridgeMessage`, or `MessageStore`.
 
 ## 8. Configuration Schema
 
-> **Note:** The master password is always required at startup (via `MXBIRDGE_MASTER_KEY` env var or interactive prompt). It is used for config field decryption and database encryption key derivation. Plaintext credentials in the config file are automatically encrypted on first run.
+> **Note:** The master password is always required at startup (via `MXBRIDGE_MASTER_KEY` env var or interactive prompt). It is used for config field decryption and database encryption key derivation. Plaintext credentials in the config file are automatically encrypted on first run.
 
 ```yaml
 logging:

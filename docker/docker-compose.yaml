@@ -6,7 +6,7 @@ services:
     container_name: matrix-bridge
     restart: unless-stopped
     environment:
-      - MXBIRDGE_MASTER_KEY=${MASTER_KEY:-}
+      - MXBRIDGE_MASTER_KEY=${MASTER_KEY:-}
     volumes:
       - ../config:/app/config
       - ../store:/app/store

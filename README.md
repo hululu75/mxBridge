@@ -25,7 +25,7 @@ cp config.example.yaml config/config.yaml
 # Edit config/config.yaml with your settings
 
 # Set master key for non-interactive startup (required)
-export MXBIRDGE_MASTER_KEY="your-master-password"
+export MXBRIDGE_MASTER_KEY="your-master-password"
 
 docker compose -f docker/docker-compose.yaml up -d
 ```
@@ -123,7 +123,7 @@ bridge:
 
 | Variable | Description |
 |----------|-------------|
-| `MXBIRDGE_MASTER_KEY` | Master password for config decryption and database encryption (required) |
+| `MXBRIDGE_MASTER_KEY` | Master password for config decryption and database encryption (required) |
 | `MXBRIDGE_CONFIG` | Path to config file (default: `config.yaml`) |
 
 ### First-run setup

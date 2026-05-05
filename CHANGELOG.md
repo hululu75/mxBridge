@@ -14,7 +14,7 @@ All notable changes to the Matrix Bridge project are documented in this file.
   - `state_processed_events`, `state_event_room_map`, `state_source_target_map`, `state_failed_decryptions` tables
   - Automatic one-time migration from existing `state.json` (file deleted after successful migration)
   - `StateManager.flush()` is now a no-op (writes are immediate)
-- **Master password always required** — startup always prompts for master password (or `MXBIRDGE_MASTER_KEY` env var)
+- **Master password always required** — startup always prompts for master password (or `MXBRIDGE_MASTER_KEY` env var)
   - Used for both config field decryption and database encryption key derivation
   - No longer optional when no encrypted fields exist
 - **Auto-encrypt plaintext credentials** — if config contains plaintext `access_token`, `password`, `key_import_passphrase`, or `web.password`, they are automatically encrypted on first run

@@ -14,6 +14,7 @@ from bridge.message_store import (
     FailedDecryption,
     ProcessedEvent,
     SourceTargetMap,
+    db,
 )
 
 logger = logging.getLogger(__name__)
@@ -154,14 +155,15 @@ class StateManager:
         await asyncio.to_thread(self._trim_and_save_event_room, event_id, room_id)
 
     def _trim_and_save_event_room(self, event_id: str, room_id: str) -> None:
-        EventRoomMap.replace(event_id=event_id, room_id=room_id).execute()
-        count = EventRoomMap.select().count()
-        if count > MAX_EVENT_MAP:
-            excess = count - MAX_EVENT_MAP
-            removed = [r.event_id for r in EventRoomMap.select(EventRoomMap.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
-            EventRoomMap.delete().where(EventRoomMap.event_id << removed).execute()
-            for eid in removed:
-                self._event_room_map.pop(eid, None)
+        with db.atomic():
+            EventRoomMap.replace(event_id=event_id, room_id=room_id).execute()
+            count = EventRoomMap.select().count()
+            if count > MAX_EVENT_MAP:
+                excess = count - MAX_EVENT_MAP
+                removed = [r.event_id for r in EventRoomMap.select(EventRoomMap.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
+                EventRoomMap.delete().where(EventRoomMap.event_id << removed).execute()
+                for eid in removed:
+                    self._event_room_map.pop(eid, None)
 
     def get_event_room(self, event_id: str) -> Optional[str]:
         return self._event_room_map.get(event_id)
@@ -173,14 +175,15 @@ class StateManager:
         await asyncio.to_thread(self._trim_and_save_source_target, source_event_id, target_event_id)
 
     def _trim_and_save_source_target(self, source_event_id: str, target_event_id: str) -> None:
-        SourceTargetMap.replace(source_event_id=source_event_id, target_event_id=target_event_id).execute()
-        count = SourceTargetMap.select().count()
-        if count > MAX_EVENT_MAP:
-            excess = count - MAX_EVENT_MAP
-            removed = [r.source_event_id for r in SourceTargetMap.select(SourceTargetMap.source_event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
-            SourceTargetMap.delete().where(SourceTargetMap.source_event_id << removed).execute()
-            for sid in removed:
-                self._source_target_map.pop(sid, None)
+        with db.atomic():
+            SourceTargetMap.replace(source_event_id=source_event_id, target_event_id=target_event_id).execute()
+            count = SourceTargetMap.select().count()
+            if count > MAX_EVENT_MAP:
+                excess = count - MAX_EVENT_MAP
+                removed = [r.source_event_id for r in SourceTargetMap.select(SourceTargetMap.source_event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
+                SourceTargetMap.delete().where(SourceTargetMap.source_event_id << removed).execute()
+                for sid in removed:
+                    self._source_target_map.pop(sid, None)
 
     def get_target_event_id(self, source_event_id: str) -> Optional[str]:
         return self._source_target_map.get(source_event_id)
@@ -219,13 +222,14 @@ class StateManager:
         await asyncio.to_thread(self._trim_and_save_processed, event_id)
 
     def _trim_and_save_processed(self, event_id: str) -> None:
-        ProcessedEvent.insert(event_id=event_id).on_conflict_ignore().execute()
-        count = ProcessedEvent.select().count()
-        if count > MAX_PROCESSED_CACHE:
-            excess = count - MAX_PROCESSED_CACHE
-            removed = [r.event_id for r in ProcessedEvent.select(ProcessedEvent.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
-            ProcessedEvent.delete().where(ProcessedEvent.event_id << removed).execute()
-            self._processed_set -= set(removed)
+        with db.atomic():
+            ProcessedEvent.insert(event_id=event_id).on_conflict_ignore().execute()
+            count = ProcessedEvent.select().count()
+            if count > MAX_PROCESSED_CACHE:
+                excess = count - MAX_PROCESSED_CACHE
+                removed = [r.event_id for r in ProcessedEvent.select(ProcessedEvent.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess)]
+                ProcessedEvent.delete().where(ProcessedEvent.event_id << removed).execute()
+                self._processed_set -= set(removed)
 
     # -------------------------------------------------- forwarding state
 
@@ -261,33 +265,34 @@ class StateManager:
         await asyncio.to_thread(self._trim_and_save_failed, session_id, room_id, event_id)
 
     def _trim_and_save_failed(self, session_id: str, room_id: str, event_id: str) -> None:
-        try:
-            FailedDecryption.insert(
-                session_id=session_id, room_id=room_id, event_id=event_id
-            ).on_conflict_ignore().execute()
-        except Exception:
-            pass
-        count = FailedDecryption.select().count()
-        if count > MAX_FAILED_DECRYPTIONS:
-            excess = count - MAX_FAILED_DECRYPTIONS
-            oldest = list(FailedDecryption.select(FailedDecryption.session_id, FailedDecryption.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess))
-            if oldest:
-                removed_sessions: dict[str, set[str]] = {}
-                for r in oldest:
-                    removed_sessions.setdefault(r.session_id, set()).add(r.event_id)
-                all_pairs = [(r.session_id, r.event_id) for r in oldest]
-                for sid, eid in all_pairs:
-                    FailedDecryption.delete().where(
-                        (FailedDecryption.session_id == sid) & (FailedDecryption.event_id == eid)
-                    ).execute()
-                for sid, eids in removed_sessions.items():
-                    session_events = self._failed_decryptions.get(sid)
-                    if session_events:
-                        remaining = [e for e in session_events if e["event_id"] not in eids]
-                        if remaining:
-                            self._failed_decryptions[sid] = remaining
-                        else:
-                            self._failed_decryptions.pop(sid, None)
+        with db.atomic():
+            try:
+                FailedDecryption.insert(
+                    session_id=session_id, room_id=room_id, event_id=event_id
+                ).on_conflict_ignore().execute()
+            except Exception:
+                pass
+            count = FailedDecryption.select().count()
+            if count > MAX_FAILED_DECRYPTIONS:
+                excess = count - MAX_FAILED_DECRYPTIONS
+                oldest = list(FailedDecryption.select(FailedDecryption.session_id, FailedDecryption.event_id).order_by(peewee.SQL('rowid').asc()).limit(excess))
+                if oldest:
+                    removed_sessions: dict[str, set[str]] = {}
+                    for r in oldest:
+                        removed_sessions.setdefault(r.session_id, set()).add(r.event_id)
+                    all_pairs = [(r.session_id, r.event_id) for r in oldest]
+                    for sid, eid in all_pairs:
+                        FailedDecryption.delete().where(
+                            (FailedDecryption.session_id == sid) & (FailedDecryption.event_id == eid)
+                        ).execute()
+                    for sid, eids in removed_sessions.items():
+                        session_events = self._failed_decryptions.get(sid)
+                        if session_events:
+                            remaining = [e for e in session_events if e["event_id"] not in eids]
+                            if remaining:
+                                self._failed_decryptions[sid] = remaining
+                            else:
+                                self._failed_decryptions.pop(sid, None)
 
     async def pop_failed_decryptions(self, session_id: str) -> list[dict]:
         items = self._failed_decryptions.pop(session_id, [])

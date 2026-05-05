@@ -165,12 +165,12 @@ source:
   password: ""                      # 不再需要
 ```
 
-启动时，桥接将提示输入主密码来解密这些值。也可以通过设置 `MXBIRDGE_MASTER_KEY` 环境变量来跳过交互式提示：
+启动时，桥接将提示输入主密码来解密这些值。也可以通过设置 `MXBRIDGE_MASTER_KEY` 环境变量来跳过交互式提示：
 
 > **注意：** 主密码在启动时**始终需要**。它用于配置字段解密和数据库加密。明文凭据会在首次运行时自动加密。
 
 ```bash
-export MXBIRDGE_MASTER_KEY="your-master-password"
+export MXBRIDGE_MASTER_KEY="your-master-password"
 python3 main.py
 ```
 
@@ -263,7 +263,7 @@ sudo systemctl status matrix-bridge
 
 ### 首次运行交互式设置
 
-主密码在启动时**始终需要**（通过 `MXBIRDGE_MASTER_KEY` 环境变量或交互式提示）。它用于：
+主密码在启动时**始终需要**（通过 `MXBRIDGE_MASTER_KEY` 环境变量或交互式提示）。它用于：
 1. 解密加密的配置字段（`enc:` 前缀字段）
 2. 派生 `messages.db` 的 SQLCipher 加密密钥
 3. 自动加密配置中发现的明文凭据
@@ -273,7 +273,7 @@ sudo systemctl status matrix-bridge
 2. 加密收到的访问令牌并写回 `config.yaml`
 3. 提供导入 E2EE 密钥文件的选项
 
-后续启动时，只需输入主密码（或设置 `MXBIRDGE_MASTER_KEY`）。盐文件（`messages.db.salt`）会自动生成以派生数据库加密密钥 — **不要删除此文件**。
+后续启动时，只需输入主密码（或设置 `MXBRIDGE_MASTER_KEY`）。盐文件（`messages.db.salt`）会自动生成以派生数据库加密密钥 — **不要删除此文件**。
 
 ## 使用方法
 

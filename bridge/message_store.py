@@ -49,7 +49,7 @@ def _normalize_timestamp(ts) -> str:
 
 
 def _sanitize_fts_query(query: str) -> str:
-    sanitized = re.sub(r'[*"(){}[\]|^:&\\]', ' ', query)
+    sanitized = re.sub(r'[*"(){}[\]|^:&\\<>~`]', ' ', query)
     tokens = sanitized.split()
     return ' '.join(f'"{t}"' for t in tokens if t)
 
@@ -942,7 +942,8 @@ class MessageStore:
         target_dict = self._model_to_dict(msg)
         before_dicts = list(reversed([self._model_to_dict(m) for m in before_rows]))
         after_dicts = [self._model_to_dict(m) for m in after_rows]
-        enriched = self._enrich_aliases([target_dict] + before_dicts + after_dicts)
+        all_dicts = [target_dict] + before_dicts + after_dicts
+        enriched = self._enrich_aliases(all_dicts)
         n_before = len(before_dicts)
 
         return {

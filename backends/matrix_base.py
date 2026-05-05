@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import getpass
 import logging
 import os
@@ -50,6 +51,9 @@ SYNC_TIMEOUT = 30000
 FLUSH_INTERVAL = 60
 KEY_RECHECK_INTERVAL = 120
 MAX_PENDING_SESSIONS = 200
+MAX_PENDING_EVENTS_PER_SESSION = 50
+MAX_DISPLAYNAME_CACHE = 1000
+MAX_ROOM_NAME_CACHE = 500
 
 
 class MatrixBackend(BaseBackend):
@@ -69,6 +73,8 @@ class MatrixBackend(BaseBackend):
         self._config_path = config_path
         self._displayname_cache: dict[str, str] = {}
         self._room_name_cache: dict[str, str] = {}
+        self._displayname_order: collections.deque[str] = collections.deque()
+        self._room_name_order: collections.deque[str] = collections.deque()
 
     # ------------------------------------------------------------------ client
 
@@ -86,6 +92,9 @@ class MatrixBackend(BaseBackend):
             resp = await self._get_client().get_displayname(sender)
             if hasattr(resp, "displayname") and resp.displayname:
                 self._displayname_cache[sender] = resp.displayname
+                if sender not in self._displayname_order:
+                    self._displayname_order.append(sender)
+                self._trim_cache(self._displayname_cache, self._displayname_order, MAX_DISPLAYNAME_CACHE)
                 return resp.displayname
         except Exception:
             pass
@@ -105,11 +114,23 @@ class MatrixBackend(BaseBackend):
             user = room.users.get(client.user_id)
             if user and user.display_name:
                 self._displayname_cache["__own__"] = user.display_name
+                if "__own__" not in self._displayname_order:
+                    self._displayname_order.append("__own__")
+                self._trim_cache(self._displayname_cache, self._displayname_order, MAX_DISPLAYNAME_CACHE)
                 return user.display_name
         return client.user_id
 
     def _invalidate_own_displayname_cache(self) -> None:
         self._displayname_cache.pop("__own__", None)
+        if "__own__" in self._displayname_order:
+            self._displayname_order.remove("__own__")
+
+    def _trim_cache(self, cache: dict, order: collections.deque, max_size: int) -> None:
+        while len(cache) > max_size:
+            if not order:
+                break
+            oldest = order.popleft()
+            cache.pop(oldest, None)
 
     async def get_room_name_for(self, room_id: str) -> str:
         client = self._client
@@ -132,6 +153,9 @@ class MatrixBackend(BaseBackend):
                 name = resp.content.get("name")
                 if name:
                     self._room_name_cache[room_id] = name
+                    if room_id not in self._room_name_order:
+                        self._room_name_order.append(room_id)
+                    self._trim_cache(self._room_name_cache, self._room_name_order, MAX_ROOM_NAME_CACHE)
                     return name
         except Exception:
             pass
@@ -141,10 +165,16 @@ class MatrixBackend(BaseBackend):
                 alias = resp.content.get("alias")
                 if alias:
                     self._room_name_cache[room_id] = alias
+                    if room_id not in self._room_name_order:
+                        self._room_name_order.append(room_id)
+                    self._trim_cache(self._room_name_cache, self._room_name_order, MAX_ROOM_NAME_CACHE)
                     return alias
                 aliases = resp.content.get("alt_aliases")
                 if aliases:
                     self._room_name_cache[room_id] = aliases[0]
+                    if room_id not in self._room_name_order:
+                        self._room_name_order.append(room_id)
+                    self._trim_cache(self._room_name_cache, self._room_name_order, MAX_ROOM_NAME_CACHE)
                     return aliases[0]
         except Exception:
             pass
@@ -281,7 +311,7 @@ class MatrixBackend(BaseBackend):
     async def stop(self) -> None:
         self._running = False
         for attr in ("_flush_task", "_key_upload_task", "_sync_task", "_call_cleanup_task"):
-            task = getattr(self, attr)
+            task = getattr(self, attr, None)
             if task:
                 task.cancel()
                 try:
@@ -371,6 +401,14 @@ class MatrixBackend(BaseBackend):
         if event.event_id not in self._pending_event_ids:
             self._pending_event_ids.add(event.event_id)
             entry["events"].append((room, event))
+            if len(entry["events"]) > MAX_PENDING_EVENTS_PER_SESSION:
+                discarded = entry["events"].pop(0)
+                self._pending_event_ids.discard(discarded[1].event_id)
+                logger.warning(
+                    "[%s] session %s exceeds %d pending events, discarded oldest %s",
+                    self.name, session_id, MAX_PENDING_EVENTS_PER_SESSION,
+                    discarded[1].event_id,
+                )
 
         await self._on_pending_encrypted_enqueued(room, event, session_id, error)
 

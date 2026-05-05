@@ -165,12 +165,12 @@ source:
   password: ""                      # no longer needed
 ```
 
-At startup, the bridge will prompt for the master password to decrypt these values. You can also set the `MXBIRDGE_MASTER_KEY` environment variable to skip the interactive prompt:
+At startup, the bridge will prompt for the master password to decrypt these values. You can also set the `MXBRIDGE_MASTER_KEY` environment variable to skip the interactive prompt:
 
 > **Note:** The master password is **always required** at startup. It is used for both config field decryption and database encryption. Plaintext credentials are automatically encrypted on first run.
 
 ```bash
-export MXBIRDGE_MASTER_KEY="your-master-password"
+export MXBRIDGE_MASTER_KEY="your-master-password"
 python3 main.py
 ```
 
@@ -263,7 +263,7 @@ sudo systemctl status matrix-bridge
 
 ### First-run interactive setup
 
-The master password is **always required** at startup (via `MXBIRDGE_MASTER_KEY` env var or interactive prompt). It is used to:
+The master password is **always required** at startup (via `MXBRIDGE_MASTER_KEY` env var or interactive prompt). It is used to:
 1. Decrypt encrypted config values (`enc:` prefixed fields)
 2. Derive the SQLCipher encryption key for `messages.db`
 3. Auto-encrypt any plaintext credentials found in config
@@ -273,7 +273,7 @@ If `access_token` is not provided in config but `password` is, the bridge will:
 2. Encrypt the received access token and write it back to `config.yaml`
 3. Offer to import an E2EE key file
 
-On subsequent starts, you only need to enter the master password (or set `MXBIRDGE_MASTER_KEY`). A salt file (`messages.db.salt`) is auto-generated to derive the database encryption key — **do not delete this file**.
+On subsequent starts, you only need to enter the master password (or set `MXBRIDGE_MASTER_KEY`). A salt file (`messages.db.salt`) is auto-generated to derive the database encryption key — **do not delete this file**.
 
 ## Usage
 
