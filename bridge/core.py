@@ -58,6 +58,9 @@ class BridgeCore:
         self._control_lock = asyncio.Lock()
         self._admin_users: set[str] = set(bridge_config.get("admin_users", []))
         self._target_room: str = getattr(target, "target_room", "") if target else ""
+        self._receipt_buffer: dict[str, str] = {}
+        self._receipt_flush_task: Optional[asyncio.Task] = None
+        self._receipt_flush_delay: float = float(bridge_config.get("receipt_flush_delay", 0.5))
 
     def _format_message(self, msg: BridgeMessage) -> str:
         if msg.msgtype == MessageType.EMOTE:
@@ -72,6 +75,7 @@ class BridgeCore:
 
     async def start(self) -> None:
         self._source.on_message(self._on_source_message)
+        self._source.on_read_receipt(self._on_source_read_receipt)
         if self._media_dir:
             os.makedirs(self._media_dir, exist_ok=True)
             logger.info("Media files will be saved to %s", self._media_dir)
@@ -107,6 +111,12 @@ class BridgeCore:
 
     async def stop(self) -> None:
         self._shutdown_event.set()
+        if self._receipt_flush_task and not self._receipt_flush_task.done():
+            self._receipt_flush_task.cancel()
+            try:
+                await self._receipt_flush_task
+            except asyncio.CancelledError:
+                pass
         logger.log(ALWAYS, "BridgeCore stopping")
         backends = []
         if self._target:
@@ -155,6 +165,32 @@ class BridgeCore:
                 await self._forward_text(target, target_room, msg)
         except Exception as e:
             logger.error("Failed to forward message from %s: %s", msg.source_room_id, e)
+
+    async def _on_source_read_receipt(self, source_event_id: str, room_id: str) -> None:
+        if self._backup_mode or not self._target:
+            return
+        target_event_id = self._lookup_target_event(source_event_id)
+        if not target_event_id:
+            return
+        target_room = self._target_room
+        if not target_room:
+            return
+        self._receipt_buffer[target_room] = target_event_id
+        if self._receipt_flush_task is None or self._receipt_flush_task.done():
+            self._receipt_flush_task = asyncio.create_task(self._flush_receipts())
+
+    async def _flush_receipts(self) -> None:
+        await asyncio.sleep(self._receipt_flush_delay)
+        if not self._receipt_buffer:
+            return
+        pending = self._receipt_buffer.copy()
+        self._receipt_buffer.clear()
+        for room, event_id in pending.items():
+            try:
+                await self._target.send_read_receipt(room, event_id)
+                logger.debug("Read receipt forwarded: %s", event_id)
+            except Exception as e:
+                logger.warning("Failed to forward read receipt for %s: %s", event_id, e)
 
     async def _save_event_map(self, event_id: str, room_id: str) -> None:
         self._room_id_map[event_id] = room_id
@@ -317,6 +353,7 @@ class BridgeCore:
                 self._forwarding_paused = False
                 self._source_to_target_map.clear()
                 self._room_id_map.clear()
+                self._receipt_buffer.clear()
                 if self._state:
                     await self._state.clear_mappings()
                 logger.log(ALWAYS, "Source backend stopped by %s", msg.sender)

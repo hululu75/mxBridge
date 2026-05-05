@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import shutil
+import stat
+import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -48,6 +50,7 @@ class WebServer:
         html_path = TEMPLATES_DIR / "index.html"
         self._index_html = html_path.read_text() if html_path.exists() else "<h1>Matrix Bridge Message Search</h1>"
         self._app = web.Application(middlewares=[self._auth_middleware])
+        self._import_running = False
         self._backfill_task: Optional[asyncio.Task] = None
         self._backfill_state: dict = {
             "running": False,
@@ -73,6 +76,8 @@ class WebServer:
         self._app.router.add_get("/api/media/{event_id}", self._api_media)
         self._app.router.add_post("/api/backfill", self._api_backfill_start)
         self._app.router.add_get("/api/backfill/status", self._api_backfill_status)
+        self._app.router.add_get("/api/export", self._api_export)
+        self._app.router.add_post("/api/import", self._api_import)
         self._app.router.add_static(
             "/static", TEMPLATES_DIR, show_index=False, follow_symlinks=False
         )
@@ -342,6 +347,176 @@ class WebServer:
                     await client.close()
                 except Exception:
                     pass
+
+    async def _api_export(self, request: web.Request) -> web.Response:
+        fmt = request.query.get("format", "json")
+        client_ip = self._get_client_ip(request)
+        logger.info("Export requested by %s, format=%s", client_ip, fmt)
+        if fmt == "sqlite":
+            fd, tmp_path = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
+            try:
+                count = await asyncio.to_thread(self._store.export_to_sqlite_file, tmp_path)
+                resp = web.StreamResponse(
+                    headers={
+                        "Content-Disposition": 'attachment; filename="mxBridge_export.db"',
+                        "Content-Type": "application/octet-stream",
+                        "X-Export-Count": str(count),
+                    },
+                )
+                await resp.prepare(request)
+                with open(tmp_path, "rb") as f:
+                    while True:
+                        chunk = await asyncio.to_thread(f.read, 65_536)
+                        if not chunk:
+                            break
+                        await resp.write(chunk)
+                await resp.write_eof()
+                return resp
+            except Exception as e:
+                raise web.HTTPInternalServerError(
+                    text=json.dumps({"error": str(e)}), content_type="application/json"
+                )
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        else:
+            try:
+                fd, tmp_path = tempfile.mkstemp(suffix=".json")
+                os.close(fd)
+                try:
+                    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+                    count = await asyncio.to_thread(self._store.export_all_json, tmp_path)
+                    resp = web.StreamResponse(
+                        headers={
+                            "Content-Disposition": 'attachment; filename="mxBridge_export.json"',
+                            "Content-Type": "application/json",
+                            "X-Export-Count": str(count),
+                        },
+                    )
+                    await resp.prepare(request)
+                    with open(tmp_path, "rb") as f:
+                        while True:
+                            chunk = await asyncio.to_thread(f.read, 65_536)
+                            if not chunk:
+                                break
+                            await resp.write(chunk)
+                    await resp.write_eof()
+                    return resp
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                raise web.HTTPInternalServerError(
+                    text=json.dumps({"error": str(e)}), content_type="application/json"
+                )
+
+    async def _api_import(self, request: web.Request) -> web.Response:
+        client_ip = self._get_client_ip(request)
+        logger.info("Import requested by %s", client_ip)
+        if self._import_running:
+            raise web.HTTPConflict(
+                text=json.dumps({"error": "Import already in progress"}),
+                content_type="application/json",
+            )
+        self._import_running = True
+        try:
+            return await self._api_import_inner(request)
+        finally:
+            self._import_running = False
+
+    async def _api_import_inner(self, request: web.Request) -> web.Response:
+        content_type = request.content_type or ""
+        if content_type.startswith("multipart/"):
+            reader = await request.multipart()
+            part = await reader.next()
+            if not part:
+                raise web.HTTPBadRequest(
+                    text=json.dumps({"error": "No file uploaded"}),
+                    content_type="application/json",
+                )
+            filename = part.filename or ""
+            fd, tmp_path = tempfile.mkstemp(suffix=".tmp")
+            try:
+                total_size = 0
+                max_size = 500 * 1024 * 1024
+                with os.fdopen(fd, "wb") as tmp_f:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        total_size += len(chunk)
+                        if total_size > max_size:
+                            raise web.HTTPBadRequest(
+                                text=json.dumps({"error": "File too large (max 500 MB)"}),
+                                content_type="application/json",
+                            )
+                        tmp_f.write(chunk)
+                with open(tmp_path, "rb") as f:
+                    header = f.read(16)
+                is_sqlite = header == b"SQLite format 3\x00"
+                if is_sqlite:
+                    db_path = tmp_path + ".db"
+                    os.rename(tmp_path, db_path)
+                    tmp_path = None
+                    try:
+                        result = await asyncio.to_thread(self._store.import_from_sqlite_file, db_path)
+                    except Exception as e:
+                        raise web.HTTPBadRequest(
+                            text=json.dumps({"error": f"Invalid SQLite file: {e}"}),
+                            content_type="application/json",
+                        )
+                    finally:
+                        try:
+                            os.unlink(db_path)
+                        except OSError:
+                            pass
+                else:
+                    json_max_size = 100 * 1024 * 1024
+                    if total_size > json_max_size:
+                        raise web.HTTPBadRequest(
+                            text=json.dumps({"error": "JSON file too large (max 100 MB for JSON; use SQLite for larger datasets)"}),
+                            content_type="application/json",
+                        )
+                    try:
+                        with open(tmp_path, "rb") as f:
+                            file_data = f.read()
+                        data = json.loads(file_data)
+                        file_data = None
+                    except json.JSONDecodeError as e:
+                        raise web.HTTPBadRequest(
+                            text=json.dumps({"error": f"Invalid JSON: {e}"}),
+                            content_type="application/json",
+                        )
+                    try:
+                        result = await asyncio.to_thread(self._store.import_from_json, data)
+                    except Exception as e:
+                        raise web.HTTPInternalServerError(
+                            text=json.dumps({"error": str(e)}), content_type="application/json"
+                        )
+            except web.HTTPError:
+                raise
+            except Exception as e:
+                raise web.HTTPInternalServerError(
+                    text=json.dumps({"error": str(e)}), content_type="application/json"
+                )
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+        else:
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": "Expected multipart upload"}),
+                content_type="application/json",
+            )
+
+        return web.json_response(result)
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self._app)

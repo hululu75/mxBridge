@@ -203,6 +203,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
   <div class="header">
     <h1>Matrix Bridge</h1>
     <button class="btn btn-primary" id="backfillBtn" onclick="showBackfillDialog()" style="margin-left:8px">Backfill</button>
+    <button class="btn btn-ghost" id="exportBtn" onclick="showExportDialog()" style="margin-left:4px">Export</button>
+    <button class="btn btn-ghost" id="importBtn" onclick="showImportDialog()" style="margin-left:4px">Import</button>
     <span class="stats" id="statsBar"></span>
   </div>
 
@@ -1016,6 +1018,106 @@ function pollBackfill() {
     } catch {}
   }, 2000);
 }
+
+/* ── Export / Import ── */
+let importFileData = null;
+
+function showExportDialog() {
+  document.getElementById('exportOverlay').style.display = 'flex';
+  document.getElementById('exportProgress').style.display = 'none';
+}
+function hideExportDialog() {
+  document.getElementById('exportOverlay').style.display = 'none';
+}
+async function doExport(fmt) {
+  document.getElementById('exportProgress').style.display = 'block';
+  const btns = document.querySelectorAll('#exportOverlay .btn-primary');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const resp = await fetch('/api/export?format=' + fmt, { headers });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({error: 'Export failed'}));
+      alert(err.error || 'Export failed');
+      return;
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    let fname = fmt === 'sqlite' ? 'mxBridge_export.db' : 'mxBridge_export.json';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    if (m) fname = m[1];
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    hideExportDialog();
+  } catch (e) {
+    alert('Export failed: ' + e.message);
+  } finally {
+    btns.forEach(b => b.disabled = false);
+  }
+}
+
+function showImportDialog() {
+  document.getElementById('importOverlay').style.display = 'flex';
+  document.getElementById('importProgress').style.display = 'none';
+  document.getElementById('importResult').style.display = 'none';
+  document.getElementById('importStartBtn').disabled = true;
+  document.getElementById('importFileName').textContent = 'Click or drag file here';
+  importFileData = null;
+}
+function hideImportDialog() {
+  document.getElementById('importOverlay').style.display = 'none';
+  importFileData = null;
+}
+function handleImportFileSelect(input) {
+  const file = input.files[0];
+  if (!file) return;
+  importFileData = file;
+  document.getElementById('importFileName').textContent = file.name;
+  document.getElementById('importStartBtn').disabled = false;
+}
+function handleImportDrop(evt) {
+  const file = evt.dataTransfer.files[0];
+  if (!file) return;
+  importFileData = file;
+  document.getElementById('importFileName').textContent = file.name;
+  document.getElementById('importStartBtn').disabled = false;
+}
+async function doImport() {
+  if (!importFileData) return;
+  document.getElementById('importProgress').style.display = 'block';
+  document.getElementById('importStartBtn').disabled = true;
+  document.getElementById('importCancelBtn').disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('file', importFileData);
+    const headers = {};
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const resp = await fetch('/api/import', { method: 'POST', headers, body: fd });
+    const data = await resp.json();
+    document.getElementById('importProgress').style.display = 'none';
+    document.getElementById('importResult').style.display = 'block';
+    if (resp.ok) {
+      document.getElementById('importResultMsg').innerHTML =
+        '<span style="color:#52b788">Import complete!</span><br>' +
+        data.imported + ' messages imported, ' + data.skipped + ' duplicates skipped.';
+      loadRooms(); loadStats();
+    } else {
+      document.getElementById('importResultMsg').innerHTML =
+        '<span style="color:#e74c3c">Error: ' + esc(data.error || 'Import failed') + '</span>';
+    }
+  } catch (e) {
+    document.getElementById('importProgress').style.display = 'none';
+    document.getElementById('importResult').style.display = 'block';
+    document.getElementById('importResultMsg').innerHTML =
+      '<span style="color:#e74c3c">Error: ' + esc(e.message) + '</span>';
+  } finally {
+    document.getElementById('importCancelBtn').disabled = false;
+  }
+}
 </script>
 <!-- Backfill dialog -->
 <div id="backfillOverlay" style="display:none;position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
@@ -1069,6 +1171,49 @@ function pollBackfill() {
 <div id="lightbox" onclick="closeLightbox()">
   <span class="lb-close">&times;</span>
   <img src="" alt="">
+</div>
+
+<!-- Export dialog -->
+<div id="exportOverlay" style="display:none;position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
+  <div style="background:#16213e;padding:28px 32px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.4);width:420px;max-width:92vw">
+    <h3 style="margin:0 0 20px;color:#e0e0e0;font-size:1.15em">Export Data</h3>
+    <div style="margin-bottom:16px;font-size:.9em;color:#aaa">Export all messages and aliases. Choose a format:</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">
+      <button class="btn btn-primary" onclick="doExport('json')" style="text-align:left;padding:12px 16px">
+        <div style="font-weight:600">JSON Format</div>
+        <div style="font-size:.78em;color:#aaa;margin-top:2px">Human-readable, can be filtered/edited before re-import</div>
+      </button>
+      <button class="btn btn-primary" onclick="doExport('sqlite')" style="text-align:left;padding:12px 16px">
+        <div style="font-weight:600">SQLite Database</div>
+        <div style="font-size:.78em;color:#aaa;margin-top:2px">Binary database file, fast for large datasets</div>
+      </button>
+    </div>
+    <div id="exportProgress" style="display:none;text-align:center;padding:16px;color:#aaa;font-size:.9em">Exporting...</div>
+    <div style="text-align:right">
+      <button class="btn btn-ghost" onclick="hideExportDialog()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import dialog -->
+<div id="importOverlay" style="display:none;position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
+  <div style="background:#16213e;padding:28px 32px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.4);width:420px;max-width:92vw">
+    <h3 style="margin:0 0 20px;color:#e0e0e0;font-size:1.15em">Import Data</h3>
+    <div style="margin-bottom:14px;font-size:.9em;color:#aaa">Upload a previously exported JSON or SQLite file. Duplicate messages will be skipped.</div>
+    <div style="margin-bottom:14px;padding:16px;border:2px dashed #0f3460;border-radius:8px;text-align:center;cursor:pointer;transition:border-color .2s" onclick="document.getElementById('importFile').click()" ondragover="event.preventDefault();this.style.borderColor='#5dade2'" ondragleave="this.style.borderColor='#0f3460'" ondrop="event.preventDefault();this.style.borderColor='#0f3460';handleImportDrop(event)">
+      <div style="font-size:.9em;color:#ccc;margin-bottom:6px" id="importFileName">Click or drag file here</div>
+      <div style="font-size:.75em;color:#666">Supports .json, .db, .sqlite files</div>
+      <input type="file" id="importFile" accept=".json,.db,.sqlite,.sqlite3" style="display:none" onchange="handleImportFileSelect(this)">
+    </div>
+    <div id="importProgress" style="display:none;text-align:center;padding:16px;color:#aaa;font-size:.9em">Importing...</div>
+    <div id="importResult" style="display:none">
+      <div id="importResultMsg" style="font-size:.92em;line-height:1.6;margin-bottom:14px"></div>
+    </div>
+    <div style="text-align:right;display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn btn-ghost" id="importCancelBtn" onclick="hideImportDialog()">Cancel</button>
+      <button class="btn btn-primary" id="importStartBtn" onclick="doImport()" disabled>Import</button>
+    </div>
+  </div>
 </div>
 </body>
 </html>

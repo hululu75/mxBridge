@@ -16,6 +16,7 @@ from nio import (
     KeyVerificationEvent,
     MatrixRoom,
     MegolmEvent,
+    ReceiptEvent,
     RedactionEvent,
     RoomEncryptedMedia,
     RoomKeyEvent,
@@ -67,6 +68,7 @@ class MatrixSourceBackend(MatrixBackend):
         )
         client.add_event_callback(self._on_encrypted_event, MegolmEvent)
         client.add_event_callback(self._on_redaction_event, RedactionEvent)
+        client.add_ephemeral_callback(self._on_receipt_event, ReceiptEvent)
         self._register_common_callbacks(client)
 
         resp = await client.sync(timeout=3000, full_state=True)
@@ -269,6 +271,17 @@ class MatrixSourceBackend(MatrixBackend):
             redacted_event_id=event.redacts,
         )
         await self._emit_message(msg)
+
+    async def _on_receipt_event(self, room: MatrixRoom, event: ReceiptEvent) -> None:
+        if self._read_receipt_callback is None:
+            return
+        own_user_id = self.config.get("user_id", "")
+        for receipt in event.receipts:
+            if receipt.user_id == own_user_id:
+                continue
+            if receipt.receipt_type.value != "m.read":
+                continue
+            await self._emit_read_receipt(receipt.event_id, room.room_id)
 
     async def _on_room_key_received(self, event) -> None:
         session_id = getattr(event, "session_id", None)

@@ -412,3 +412,7 @@ class MatrixTargetBackend(MatrixBackend):
         if hasattr(resp, "event_id"):
             return resp.event_id
         return ""
+
+    async def send_read_receipt(self, room_id: str, event_id: str) -> None:
+        client = self._get_client()
+        await client.update_receipt_marker(room_id, event_id)

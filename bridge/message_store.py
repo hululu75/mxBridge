@@ -35,6 +35,19 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+_ISO_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})")
+
+
+def _normalize_timestamp(ts) -> str:
+    if isinstance(ts, datetime):
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(ts, str):
+        m = _ISO_TS_RE.match(ts)
+        if m:
+            return f"{m.group(1)} {m.group(2)}"
+    return ts or _utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _sanitize_fts_query(query: str) -> str:
     sanitized = re.sub(r'[*"(){}[\]|^:&\\]', ' ', query)
     tokens = sanitized.split()
@@ -1057,6 +1070,245 @@ class MessageStore:
             "edit_of_event_id": m.edit_of_event_id,
             "reply_to_event_id": m.reply_to_event_id,
         }
+
+    @staticmethod
+    def _build_import_row(d: dict) -> dict:
+        return {
+            "timestamp": _normalize_timestamp(d.get("timestamp", "")),
+            "direction": d.get("direction", "forward"),
+            "source_room_id": d.get("source_room_id", ""),
+            "source_room_name": d.get("source_room_name", ""),
+            "sender": d.get("sender", ""),
+            "sender_displayname": d.get("sender_displayname", ""),
+            "text": d.get("text", ""),
+            "msgtype": d.get("msgtype", "m.text"),
+            "event_id": d.get("event_id", ""),
+            "target_room_id": d.get("target_room_id", ""),
+            "media_url": d.get("media_url", ""),
+            "media_filename": d.get("media_filename", ""),
+            "media_mimetype": d.get("media_mimetype", ""),
+            "media_size": d.get("media_size", 0),
+            "call_type": d.get("call_type", ""),
+            "call_action": d.get("call_action", ""),
+            "call_duration": d.get("call_duration", 0),
+            "from_self": bool(d.get("from_self", False)),
+            "media_local_path": "",
+            "edit_of_event_id": d.get("edit_of_event_id", ""),
+            "reply_to_event_id": d.get("reply_to_event_id", ""),
+        }
+
+    def _get_existing_event_id_set(self) -> set[str]:
+        existing_ids = set()
+        cursor = db.execute_sql("SELECT event_id FROM messages")
+        while True:
+            batch = cursor.fetchmany(5000)
+            if not batch:
+                break
+            existing_ids.update(r[0] for r in batch)
+        return existing_ids
+
+    def export_all_json(self, dest_path: str) -> int:
+        import json as _json
+        cols = ", ".join(MESSAGE_COLUMNS)
+        total = 0
+        with open(dest_path, "w", encoding="utf-8") as f:
+            f.write('{"messages":[')
+            cursor = db.execute_sql(f"SELECT {cols} FROM messages ORDER BY id ASC")
+            first = True
+            while True:
+                batch = cursor.fetchmany(2000)
+                if not batch:
+                    break
+                for row in batch:
+                    d = self._row_to_dict(row)
+                    if not first:
+                        f.write(",")
+                    first = False
+                    f.write(_json.dumps(d, ensure_ascii=False, default=str))
+                    total += 1
+            f.write('],"user_aliases":[')
+            user_aliases = list(UserAlias.select())
+            for i, r in enumerate(user_aliases):
+                if i > 0:
+                    f.write(",")
+                f.write(_json.dumps({"sender_id": r.sender_id, "displayname": r.displayname}, ensure_ascii=False))
+            f.write('],"room_aliases":[')
+            room_aliases = list(RoomAlias.select())
+            for i, r in enumerate(room_aliases):
+                if i > 0:
+                    f.write(",")
+                f.write(_json.dumps({"room_id": r.room_id, "room_name": r.room_name}, ensure_ascii=False))
+            f.write(']}')
+        return total
+
+    def import_from_json(self, data: dict) -> dict:
+        messages = data.get("messages", [])
+        user_aliases = data.get("user_aliases", [])
+        room_aliases = data.get("room_aliases", [])
+        imported = 0
+        skipped = 0
+        if user_aliases:
+            with db.atomic():
+                for a in user_aliases:
+                    sid = a.get("sender_id", "")
+                    dn = a.get("displayname", "")
+                    if sid and dn and dn != sid:
+                        UserAlias.insert(sender_id=sid, displayname=dn).on_conflict(
+                            conflict_target=[UserAlias.sender_id],
+                            update={UserAlias.displayname: dn},
+                        ).execute()
+        if room_aliases:
+            with db.atomic():
+                for a in room_aliases:
+                    rid = a.get("room_id", "")
+                    rn = a.get("room_name", "")
+                    if rid and rn and rn != rid:
+                        RoomAlias.insert(room_id=rid, room_name=rn).on_conflict(
+                            conflict_target=[RoomAlias.room_id],
+                            update={RoomAlias.room_name: rn},
+                        ).execute()
+        if messages:
+            existing_ids = self._get_existing_event_id_set()
+            import_batch = []
+            for m in messages:
+                eid = m.get("event_id", "")
+                if not eid or eid in existing_ids:
+                    skipped += 1
+                    continue
+                row = self._build_import_row(m)
+                row["event_id"] = eid
+                import_batch.append(row)
+                existing_ids.add(eid)
+            for i in range(0, len(import_batch), 500):
+                with db.atomic():
+                    for row in import_batch[i:i + 500]:
+                        Message.create(**row)
+            imported = len(import_batch)
+        if self._fts_available:
+            self.rebuild_fts()
+        return {"imported": imported, "skipped": skipped}
+
+    def export_to_sqlite_file(self, dest_path: str) -> int:
+        export_db = peewee.SqliteDatabase(dest_path, pragmas={
+            "journal_mode": "wal", "busy_timeout": 5000,
+        })
+        export_db.connect()
+        try:
+            os.chmod(dest_path, stat.S_IRUSR | stat.S_IWUSR)
+            col_defs = {
+                "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+                "timestamp": "DATETIME",
+                "direction": "VARCHAR(255) NOT NULL",
+                "source_room_id": "VARCHAR(255) NOT NULL",
+                "source_room_name": "VARCHAR(255) DEFAULT ''",
+                "sender": "VARCHAR(255) NOT NULL",
+                "sender_displayname": "VARCHAR(255) DEFAULT ''",
+                "text": "TEXT DEFAULT ''",
+                "msgtype": "VARCHAR(255) DEFAULT 'm.text'",
+                "event_id": "VARCHAR(255) DEFAULT '' UNIQUE",
+                "target_room_id": "VARCHAR(255) DEFAULT ''",
+                "media_url": "VARCHAR(255) DEFAULT ''",
+                "media_filename": "VARCHAR(255) DEFAULT ''",
+                "media_mimetype": "VARCHAR(255) DEFAULT ''",
+                "media_size": "INTEGER DEFAULT 0",
+                "call_type": "VARCHAR(255) DEFAULT ''",
+                "call_action": "VARCHAR(255) DEFAULT ''",
+                "call_duration": "INTEGER DEFAULT 0",
+                "from_self": "BOOLEAN DEFAULT 0",
+                "media_local_path": "VARCHAR(255) DEFAULT ''",
+                "edit_of_event_id": "VARCHAR(255) DEFAULT ''",
+                "reply_to_event_id": "VARCHAR(255) DEFAULT ''",
+            }
+            missing = [c for c in MESSAGE_COLUMNS if c not in col_defs]
+            assert not missing, f"MESSAGE_COLUMNS has entries missing from col_defs: {missing}"
+            cols_sql = ", ".join(f"[{c}] {col_defs.get(c, 'TEXT')}" for c in MESSAGE_COLUMNS)
+            export_db.execute_sql(f"CREATE TABLE IF NOT EXISTS messages ({cols_sql})")
+            export_db.execute_sql(
+                "CREATE TABLE IF NOT EXISTS user_aliases (sender_id VARCHAR(255) PRIMARY KEY, displayname VARCHAR(255) DEFAULT '')"
+            )
+            export_db.execute_sql(
+                "CREATE TABLE IF NOT EXISTS room_aliases (room_id VARCHAR(255) PRIMARY KEY, room_name VARCHAR(255) DEFAULT '')"
+            )
+            cols = ", ".join(MESSAGE_COLUMNS)
+            cursor = db.execute_sql(f"SELECT {cols} FROM messages ORDER BY id ASC")
+            placeholders = ", ".join(["?"] * len(MESSAGE_COLUMNS))
+            col_names = ", ".join(f"[{c}]" for c in MESSAGE_COLUMNS)
+            insert_sql = f"INSERT INTO messages ({col_names}) VALUES ({placeholders})"
+            total = 0
+            while True:
+                batch = cursor.fetchmany(1000)
+                if not batch:
+                    break
+                with export_db.atomic():
+                    for row in batch:
+                        export_db.execute_sql(insert_sql, row)
+                total += len(batch)
+            for table, cols_def in [("user_aliases", ["sender_id", "displayname"]), ("room_aliases", ["room_id", "room_name"])]:
+                src_rows = db.execute_sql(f"SELECT {', '.join(cols_def)} FROM {table}").fetchall()
+                if src_rows:
+                    ph = ", ".join(["?"] * len(cols_def))
+                    cn = ", ".join(f"[{c}]" for c in cols_def)
+                    with export_db.atomic():
+                        for r in src_rows:
+                            export_db.execute_sql(f"INSERT OR REPLACE INTO {table} ({cn}) VALUES ({ph})", r)
+            return total
+        finally:
+            export_db.close()
+
+    def import_from_sqlite_file(self, src_path: str) -> dict:
+        src_db = peewee.SqliteDatabase(
+            f"file:{src_path}?mode=ro", uri=True,
+            pragmas={"busy_timeout": 5000},
+        )
+        src_db.connect()
+        try:
+            existing_ids = self._get_existing_event_id_set()
+            skipped = 0
+            src_cursor = src_db.execute_sql(f"SELECT {', '.join(MESSAGE_COLUMNS)} FROM messages ORDER BY id ASC")
+            batch_data = []
+            while True:
+                batch = src_cursor.fetchmany(1000)
+                if not batch:
+                    break
+                for row in batch:
+                    row_dict = self._row_to_dict(row)
+                    eid = row_dict.get("event_id", "")
+                    if not eid or eid in existing_ids:
+                        skipped += 1
+                        continue
+                    batch_data.append(row_dict)
+                    existing_ids.add(eid)
+            for i in range(0, len(batch_data), 500):
+                with db.atomic():
+                    for rd in batch_data[i:i + 500]:
+                        Message.create(**self._build_import_row(rd))
+            imported = len(batch_data)
+            try:
+                for table, cols_def in [
+                    ("user_aliases", ["sender_id", "displayname"], UserAlias),
+                    ("room_aliases", ["room_id", "room_name"], RoomAlias),
+                ]:
+                    alias_rows = src_db.execute_sql(f"SELECT {', '.join(cols_def)} FROM {table}").fetchall()
+                    if alias_rows:
+                        with db.atomic():
+                            for ar in alias_rows:
+                                if table == "user_aliases":
+                                    UserAlias.insert(sender_id=ar[0], displayname=ar[1]).on_conflict(
+                                        conflict_target=[UserAlias.sender_id],
+                                        update={UserAlias.displayname: ar[1]},
+                                    ).execute()
+                                else:
+                                    RoomAlias.insert(room_id=ar[0], room_name=ar[1]).on_conflict(
+                                        conflict_target=[RoomAlias.room_id],
+                                        update={RoomAlias.room_name: ar[1]},
+                                    ).execute()
+            except Exception as exc:
+                logger.warning("Failed to import aliases from sqlite file: %s", exc)
+            if self._fts_available:
+                self.rebuild_fts()
+            return {"imported": imported, "skipped": skipped}
+        finally:
+            src_db.close()
 
     def _enrich_aliases(self, results: list[dict]) -> list[dict]:
         if not results:
