@@ -274,10 +274,24 @@ async def _do_sso_flow(
 
     if not token:
         logger.info("[sso] Waiting for access_token from network requests...")
-        for _ in range(30):
+        for _ in range(10):
             await asyncio.sleep(2)
             if token:
                 break
+
+    if not token:
+        try:
+            ls_dump = await page.evaluate("""() => {
+                const result = {};
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    result[k] = localStorage.getItem(k).substring(0, 100);
+                }
+                return result;
+            }""")
+            logger.info("[sso] localStorage keys: %s", list(ls_dump.keys()) if ls_dump else "empty")
+        except Exception as e:
+            logger.debug("[sso] localStorage dump failed: %s", e)
 
     if not token:
         token = await _extract_token_from_browser(page)
