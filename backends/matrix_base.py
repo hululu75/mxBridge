@@ -390,6 +390,11 @@ class MatrixBackend(BaseBackend):
         client = self._get_client()
         resp = await client.whoami()
         if isinstance(resp, WhoamiResponse):
+            if resp.device_id and resp.device_id != client.device_id:
+                logger.info("[%s] Updating device_id from whoami: %s -> %s", self.name, client.device_id, resp.device_id)
+                client.device_id = resp.device_id
+                self.config["device_id"] = resp.device_id
+                await self._persist_device_id()
             logger.log(ALWAYS, "[%s] Auth verified: user=%s device=%s", self.name, resp.user_id, resp.device_id)
         elif "M_UNKNOWN_TOKEN" in str(resp):
             logger.log(ALWAYS, "[%s] Token expired, attempting SSO re-login...", self.name)
@@ -397,6 +402,11 @@ class MatrixBackend(BaseBackend):
             if refreshed:
                 resp2 = await client.whoami()
                 if isinstance(resp2, WhoamiResponse):
+                    if resp2.device_id and resp2.device_id != client.device_id:
+                        logger.info("[%s] Updating device_id from whoami: %s -> %s", self.name, client.device_id, resp2.device_id)
+                        client.device_id = resp2.device_id
+                        self.config["device_id"] = resp2.device_id
+                        await self._persist_device_id()
                     logger.log(ALWAYS, "[%s] Re-auth verified: user=%s device=%s", self.name, resp2.user_id, resp2.device_id)
                     return
             raise RuntimeError(f"Auth check failed for {self.name}: {resp}")

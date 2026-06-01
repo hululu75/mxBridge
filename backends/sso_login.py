@@ -309,6 +309,8 @@ async def _do_sso_flow(
     if not token:
         await _handle_post_login_page(page, element_url, recovery_key)
 
+    await _handle_device_verification(page, recovery_key)
+
     done_selectors = ["button:has-text('Done')", "a:has-text('Done')"]
     for sel in done_selectors:
         try:
@@ -669,6 +671,62 @@ async def _fill_keycloak_form(page, username: str, password: str, element_url: s
             break
     await page.wait_for_load_state("domcontentloaded")
     await _debug_screenshot(page)
+
+
+async def _handle_device_verification(page, recovery_key: str = "") -> None:
+    """Handle the Element 'Confirm your digital identity' verification overlay if present."""
+    try:
+        page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 1000) || ''")
+    except Exception:
+        return
+
+    if "confirm your digital identity" not in page_text.lower() and "recovery key" not in page_text.lower():
+        return
+
+    logger.info("[sso] Device verification overlay detected, handling...")
+    if not recovery_key:
+        recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
+
+    if recovery_key:
+        use_rk = page.locator("button:has-text('Use recovery key'), a:has-text('Use recovery key')")
+        try:
+            if await use_rk.first.is_visible(timeout=1000):
+                await use_rk.first.click()
+                logger.info("[sso] Clicked 'Use recovery key'")
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+        for sel in _RK_INPUT_SELECTORS:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=500):
+                    await el.fill(recovery_key)
+                    break
+            except Exception:
+                continue
+        for sel in _RK_SUBMIT_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info("[sso] Submitted recovery key")
+                    await asyncio.sleep(5)
+                    await page.wait_for_load_state("domcontentloaded")
+                    break
+            except Exception:
+                continue
+    else:
+        logger.warning("[sso] No recovery key provided, trying to skip verification...")
+        for sel in _SKIP_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info("[sso] Clicked skip: %s", sel)
+                    await asyncio.sleep(3)
+                    break
+            except Exception:
+                continue
 
 
 async def _submit_totp(page, totp_code: str) -> None:
