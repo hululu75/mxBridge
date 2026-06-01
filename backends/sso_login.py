@@ -287,13 +287,13 @@ async def _handle_post_login_page(page) -> None:
             continue
         if "web.collab" in new_url or "element" in new_url:
             logger.info("[sso] Redirected back to Element")
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             break
         if "login.collab" in new_url:
             logger.info("[sso] At callback proxy, waiting...")
 
     await page.wait_for_load_state("networkidle")
-    current_url = page.url
+    await _debug_screenshot(page)
 
     page_text = ""
     try:
@@ -302,6 +302,49 @@ async def _handle_post_login_page(page) -> None:
         pass
 
     if "recovery key" in page_text.lower() or "confirm your digital identity" in page_text.lower():
+        logger.info("[sso] Device verification page detected")
+        use_rk = page.locator("button:has-text('Use recovery key'), a:has-text('Use recovery key')")
+        try:
+            if await use_rk.first.is_visible(timeout=1000):
+                await use_rk.first.click()
+                logger.info("[sso] Clicked 'Use recovery key'")
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        rk_clicked = False
+        for sel in _RK_INPUT_SELECTORS:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=500):
+                    break
+            except Exception:
+                continue
+
+        recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
+        if recovery_key:
+            for sel in _RK_INPUT_SELECTORS:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=500):
+                        await el.fill(recovery_key)
+                        rk_clicked = True
+                        break
+                except Exception:
+                    continue
+            if rk_clicked:
+                for sel in _RK_SUBMIT_SELECTORS:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.is_visible(timeout=500):
+                            await btn.click()
+                            logger.info("[sso] Submitted recovery key")
+                            await asyncio.sleep(5)
+                            await page.wait_for_load_state("networkidle")
+                            break
+                    except Exception:
+                        continue
+
         skip_clicked = False
         for sel in _SKIP_SELECTORS:
             try:
@@ -315,42 +358,18 @@ async def _handle_post_login_page(page) -> None:
             except Exception:
                 continue
 
-        if not skip_clicked:
-            recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
-            if recovery_key:
-                for sel in _RK_INPUT_SELECTORS:
-                    try:
-                        el = page.locator(sel).first
-                        if await el.is_visible(timeout=500):
-                            await el.fill(recovery_key)
-                            break
-                    except Exception:
-                        continue
-                for sel in _RK_SUBMIT_SELECTORS:
-                    try:
-                        btn = page.locator(sel).first
-                        if await btn.is_visible(timeout=500):
-                            await btn.click()
-                            logger.info("[sso] Submitted recovery key")
-                            await asyncio.sleep(5)
-                            await page.wait_for_load_state("networkidle")
-                            break
-                    except Exception:
-                        continue
-            else:
-                for sel in _SKIP_SELECTORS:
-                    try:
-                        btn = page.locator(sel).first
-                        if await btn.is_visible(timeout=500):
-                            await btn.click()
-                            logger.info("[sso] Clicked skip: %s", sel)
-                            await asyncio.sleep(3)
-                            break
-                    except Exception:
-                        continue
-        await asyncio.sleep(3)
+        if not skip_clicked and not rk_clicked:
+            remove_btn = page.locator("button:has-text('Use another device'), a:has-text('Use another device')")
+            try:
+                if await remove_btn.first.is_visible(timeout=500):
+                    await remove_btn.first.click()
+                    logger.info("[sso] Clicked 'Use another device' to skip")
+                    await asyncio.sleep(3)
+            except Exception:
+                pass
 
-    await _debug_screenshot(page)
+        await asyncio.sleep(3)
+        await _debug_screenshot(page)
 
 
 async def _extract_token_from_browser(page) -> Optional[str]:
