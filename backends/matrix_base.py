@@ -222,8 +222,11 @@ class MatrixBackend(BaseBackend):
                                 if device_id_val:
                                     self.config["device_id"] = device_id_val
                                     logger.info("[%s] Discovered device_id via whoami: %s", self.name, device_id_val)
+                            else:
+                                text = await resp.text()
+                                logger.info("[%s] whoami returned %d: %s", self.name, resp.status, text[:200])
                 except Exception as e:
-                    logger.debug("[%s] whoami for device_id failed: %s", self.name, e)
+                    logger.info("[%s] whoami for device_id failed: %s", self.name, e)
             if not device_id_val:
                 logger.info("[%s] access_token present but no device_id, falling back to SSO", self.name)
                 access_token = ""
@@ -235,77 +238,57 @@ class MatrixBackend(BaseBackend):
                 )
                 logger.log(ALWAYS, "[%s] Restored login with access_token (device=%s)", self.name, device_id_val)
         if not access_token:
-            password = self.config.get("password", "")
-            if not password:
-                element_url = self.config.get("element_url", "")
-                if element_url:
-                    logger.info("[%s] No password configured, using SSO login...", self.name)
-                    try:
-                        from backends.sso_login import sso_login
-                        token, dev_id = await sso_login(
+            element_url = self.config.get("element_url", "")
+            if element_url:
+                logger.info("[%s] Using SSO login...", self.name)
+                try:
+                    from backends.sso_login import sso_login
+                    token, dev_id = await sso_login(
+                        homeserver=self.config["homeserver"],
+                        element_url=element_url,
+                        user_id=self.config["user_id"],
+                        device_id=self.config.get("device_id") or "",
+                        username=self.config.get("sso_username", ""),
+                        password=self.config.get("password", ""),
+                    )
+                    old_device_id = self.config.get("device_id") or ""
+                    if dev_id and dev_id != old_device_id:
+                        logger.info("[%s] Device ID changed: %s -> %s, clearing crypto store", self.name, old_device_id, dev_id)
+                        self._client = None
+                        if old_device_id:
+                            import glob as _glob
+                            for db_file in _glob.glob(os.path.join(store_path, "*.db")):
+                                logger.info("[%s] Removing old store: %s", self.name, db_file)
+                                os.remove(db_file)
+                        self._client = AsyncClient(
                             homeserver=self.config["homeserver"],
-                            element_url=element_url,
-                            user_id=self.config["user_id"],
-                            device_id=self.config.get("device_id") or "",
-                            username=self.config.get("sso_username", ""),
-                            password=self.config.get("password", ""),
-                        )
-                        old_device_id = self.config.get("device_id") or ""
-                        if dev_id and dev_id != old_device_id:
-                            logger.info("[%s] Device ID changed: %s -> %s, clearing crypto store", self.name, old_device_id, dev_id)
-                            self._client = None
-                            if old_device_id:
-                                import glob as _glob
-                                import shutil
-                                for db_file in _glob.glob(os.path.join(store_path, "*.db")):
-                                    logger.info("[%s] Removing old store: %s", self.name, db_file)
-                                    os.remove(db_file)
-                            self._client = AsyncClient(
-                                homeserver=self.config["homeserver"],
-                                user=self.config["user_id"],
-                                device_id=dev_id,
-                                store_path=store_path,
-                                config=client_config,
-                            )
-                        self._client.restore_login(
-                            user_id=self.config["user_id"],
+                            user=self.config["user_id"],
                             device_id=dev_id,
-                            access_token=token,
+                            store_path=store_path,
+                            config=client_config,
                         )
-                        self.config["access_token"] = token
-                        self.config["device_id"] = dev_id
-                        await self._persist_device_id()
-                    except Exception as e:
-                        raise RuntimeError(f"SSO login failed for {self.name}: {e}")
-                else:
+                    self._client.restore_login(
+                        user_id=self.config["user_id"],
+                        device_id=dev_id,
+                        access_token=token,
+                    )
+                    self.config["access_token"] = token
+                    self.config["device_id"] = dev_id
+                    await self._persist_device_id()
+                except Exception as e:
+                    raise RuntimeError(f"SSO login failed for {self.name}: {e}")
+            else:
+                password = self.config.get("password", "")
+                if not password:
                     password = getpass.getpass(f"[{self.name}] Password for {self.config['user_id']}: ")
 
-            if not self._client.access_token and not password:
-                raise RuntimeError(f"No password provided for {self.name}")
+                if not self._client.access_token and not password:
+                    raise RuntimeError(f"No password provided for {self.name}")
 
-            if self._client.access_token:
-                logger.info("[%s] Logged in via SSO", self.name)
-            else:
-                resp = await self._client.login(password)
-                if getattr(resp, "access_token", None):
-                    self._client.access_token = resp.access_token
-                    assigned_device_id = getattr(resp, "device_id", None)
-                    if assigned_device_id and not self.config.get("device_id"):
-                        self._client.device_id = assigned_device_id
-                        self.config["device_id"] = assigned_device_id
-                        logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
-                        await self._persist_device_id()
-                    logger.info("[%s] Logged in successfully", self.name)
-                elif getattr(resp, "status_code", None) == "M_UNRECOGNIZED":
-                    legacy_auth = {
-                        "type": "m.login.password",
-                        "user": self.config["user_id"],
-                        "password": password,
-                    }
-                    device_id_from_config = self.config.get("device_id") or ""
-                    if device_id_from_config:
-                        legacy_auth["device_id"] = device_id_from_config
-                    resp = await self._client.login_raw(legacy_auth)
+                if self._client.access_token:
+                    logger.info("[%s] Logged in via SSO", self.name)
+                else:
+                    resp = await self._client.login(password)
                     if getattr(resp, "access_token", None):
                         self._client.access_token = resp.access_token
                         assigned_device_id = getattr(resp, "device_id", None)
@@ -314,13 +297,32 @@ class MatrixBackend(BaseBackend):
                             self.config["device_id"] = assigned_device_id
                             logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
                             await self._persist_device_id()
-                        logger.info("[%s] Logged in successfully (legacy login format)", self.name)
+                        logger.info("[%s] Logged in successfully", self.name)
+                    elif getattr(resp, "status_code", None) == "M_UNRECOGNIZED":
+                        legacy_auth = {
+                            "type": "m.login.password",
+                            "user": self.config["user_id"],
+                            "password": password,
+                        }
+                        device_id_from_config = self.config.get("device_id") or ""
+                        if device_id_from_config:
+                            legacy_auth["device_id"] = device_id_from_config
+                        resp = await self._client.login_raw(legacy_auth)
+                        if getattr(resp, "access_token", None):
+                            self._client.access_token = resp.access_token
+                            assigned_device_id = getattr(resp, "device_id", None)
+                            if assigned_device_id and not self.config.get("device_id"):
+                                self._client.device_id = assigned_device_id
+                                self.config["device_id"] = assigned_device_id
+                                logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
+                                await self._persist_device_id()
+                            logger.info("[%s] Logged in successfully (legacy login format)", self.name)
+                        else:
+                            logger.error("[%s] Login failed: %s", self.name, resp)
+                            raise RuntimeError(f"Login failed for {self.name}: {resp}")
                     else:
                         logger.error("[%s] Login failed: %s", self.name, resp)
                         raise RuntimeError(f"Login failed for {self.name}: {resp}")
-                else:
-                    logger.error("[%s] Login failed: %s", self.name, resp)
-                    raise RuntimeError(f"Login failed for {self.name}: {resp}")
 
         # Upload unconditionally: should_upload_keys may be stale when the
         # homeserver omits one_time_key_counts from the sync response.
