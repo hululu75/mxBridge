@@ -165,6 +165,7 @@ async def sso_login(
 
     _save_cached_token(homeserver, token, device)
     logger.info("[sso] Login successful, device_id=%s", device)
+    logger.info("[sso] Returning token type=%s len=%s device=%s", type(token).__name__, len(token) if token else 0, device)
     return token, device
 
 
@@ -334,7 +335,7 @@ async def _do_sso_flow(
             }""")
             if result:
                 logger.info("[sso] Got token from IndexedDB (len=%d)", len(result))
-                return result
+                return result, device
             else:
                 logger.info("[sso] No token found in IndexedDB")
         except Exception as e:
@@ -355,7 +356,7 @@ async def _do_sso_flow(
             }""")
             if result:
                 logger.info("[sso] Got token from matrixClient")
-                return result
+                return result, device
         except Exception:
             pass
 
@@ -386,229 +387,11 @@ async def _do_sso_flow(
             }""")
             if result:
                 logger.info("[sso] Got token from intercepting fetch")
-                return result
+                return result, device
         except Exception:
             pass
 
-    if not token:
-        token = await _extract_token_from_browser(page)
-
-    return token, device
-
-
-async def _handle_post_login_page(page) -> None:
-    current_url = page.url
-    logger.info("[sso] Post-login URL: %s", current_url)
-
-    for i in range(15):
-        await asyncio.sleep(2)
-        new_url = page.url
-        logger.info("[sso] post-login check %d: %s", i, new_url)
-
-        if "consent" in new_url.lower():
-            await _handle_consent_page(page)
-            continue
-        if "web.collab" in new_url or "element" in new_url:
-            logger.info("[sso] Redirected back to Element")
-            await asyncio.sleep(5)
-            break
-        if "login.collab" in new_url:
-            logger.info("[sso] At callback proxy, waiting...")
-
-    await page.wait_for_load_state("domcontentloaded")
-    await _debug_screenshot(page)
-
-    page_text = ""
-    try:
-        page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 1000) || ''")
-    except Exception:
-        pass
-    logger.info("[sso] page_text for verification check: %.200s", page_text)
-
-    if "recovery key" in page_text.lower() or "confirm your digital identity" in page_text.lower():
-        logger.info("[sso] Device verification page detected")
-        use_rk = page.locator("button:has-text('Use recovery key'), a:has-text('Use recovery key')")
-        try:
-            if await use_rk.first.is_visible(timeout=1000):
-                await use_rk.first.click()
-                logger.info("[sso] Clicked 'Use recovery key'")
-                await asyncio.sleep(2)
-        except Exception:
-            pass
-
-        rk_clicked = False
-        for sel in _RK_INPUT_SELECTORS:
-            try:
-                el = page.locator(sel).first
-                if await el.is_visible(timeout=500):
-                    break
-            except Exception:
-                continue
-
-        recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
-        if recovery_key:
-            for sel in _RK_INPUT_SELECTORS:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=500):
-                        await el.fill(recovery_key)
-                        rk_clicked = True
-                        break
-                except Exception:
-                    continue
-            if rk_clicked:
-                for sel in _RK_SUBMIT_SELECTORS:
-                    try:
-                        btn = page.locator(sel).first
-                        if await btn.is_visible(timeout=500):
-                            await btn.click()
-                            logger.info("[sso] Submitted recovery key")
-                            await asyncio.sleep(5)
-                            await page.wait_for_load_state("domcontentloaded")
-                            break
-                    except Exception:
-                        continue
-
-        skip_clicked = False
-        for sel in _SKIP_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info("[sso] Clicked skip: %s", sel)
-                    skip_clicked = True
-                    await asyncio.sleep(3)
-                    break
-            except Exception:
-                continue
-
-        if not skip_clicked and not rk_clicked:
-            remove_btn = page.locator("button:has-text('Use another device'), a:has-text('Use another device')")
-            try:
-                if await remove_btn.first.is_visible(timeout=500):
-                    await remove_btn.first.click()
-                    logger.info("[sso] Clicked 'Use another device' to skip")
-                    await asyncio.sleep(3)
-            except Exception:
-                pass
-
-        await asyncio.sleep(3)
-        await _debug_screenshot(page)
-
-    try:
-        clicked = await page.evaluate("""() => {
-            const btns = document.querySelectorAll('button, a, [role="button"]');
-            for (const btn of btns) {
-                if (btn.innerText.trim() === 'Done') {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }""")
-        if clicked:
-            logger.info("[sso] Clicked 'Done' button via JS")
-            await asyncio.sleep(5)
-        else:
-            logger.info("[sso] No 'Done' button found via JS")
-    except Exception as e:
-        logger.debug("[sso] Done button click failed: %s", e)
-
-
-async def _extract_token_from_browser(page) -> Optional[str]:
-    try:
-        result = await page.evaluate("""() => {
-            // Try all localStorage values
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                try {
-                    const v = JSON.parse(localStorage.getItem(k));
-                    if (v && typeof v === 'object') {
-                        for (const [key, val] of Object.entries(v)) {
-                            if (typeof val === 'string' && (val.startsWith('syt_') || val.startsWith('sso_') || val.startsWith('MDAxOG'))) return val;
-                        }
-                    }
-                    if (typeof v === 'string' && (v.startsWith('syt_') || v.startsWith('sso_') || v.startsWith('MDAxOG'))) return v;
-                } catch(e) {}
-            }
-            // Try sessionStorage
-            for (let i = 0; i < sessionStorage.length; i++) {
-                const k = sessionStorage.key(i);
-                try {
-                    const v = JSON.parse(sessionStorage.getItem(k));
-                    if (v && typeof v === 'object') {
-                        for (const [key, val] of Object.entries(v)) {
-                            if (typeof val === 'string' && (val.startsWith('syt_') || val.startsWith('sso_') || val.startsWith('MDAxOG'))) return val;
-                        }
-                    }
-                } catch(e) {}
-            }
-            // Try matrixClient
-            try {
-                const mx = window.matrixClient || window.mx_matrixClientPeg;
-                if (mx) {
-                    if (typeof mx.getAccessToken === 'function') return mx.getAccessToken();
-                    if (mx._http && mx._http.opts && mx._http.opts.accessToken) return mx._http.opts.accessToken;
-                    if (mx.client && mx.client.getAccessToken) return mx.client.getAccessToken();
-                }
-            } catch(e) {}
-            // Try React internals
-            try {
-                const rootEl = document.getElementById('root') || document.getElementById('matrixchat');
-                if (rootEl && rootEl._reactRootContainer) {
-                    // Can't easily extract from React fiber
-                }
-            } catch(e) {}
-            return null;
-        }""")
-        if result:
-            logger.info("[sso] Got token from browser storage")
-            return result
-    except Exception as e:
-        logger.debug("[sso] Browser token extraction failed: %s", e)
-
-    try:
-        result = await page.evaluate("""async () => {
-            const dbs = await indexedDB.databases();
-            for (const dbInfo of dbs) {
-                try {
-                    const idb = await new Promise((resolve, reject) => {
-                        const req = indexedDB.open(dbInfo.name);
-                        req.onsuccess = () => resolve(req.result);
-                        req.onerror = () => resolve(null);
-                    });
-                    if (!idb) continue;
-                    for (const name of idb.objectStoreNames) {
-                        try {
-                            const tx = idb.transaction(name, 'readonly');
-                            const store = tx.objectStore(name);
-                            const items = await new Promise((resolve) => {
-                                const req = store.getAll();
-                                req.onsuccess = () => resolve(req.result);
-                                req.onerror = () => resolve([]);
-                            });
-                            for (const item of items) {
-                                const obj = item.value || item.session || item;
-                                if (typeof obj === 'object' && obj) {
-                                    for (const [k, v] of Object.entries(obj)) {
-                                        if (typeof v === 'string' && (v.startsWith('syt_') || v.startsWith('MDAxOG'))) return v;
-                                    }
-                                }
-                                if (typeof item === 'string' && (item.startsWith('syt_') || item.startsWith('MDAxOG'))) return item;
-                            }
-                        } catch(e) {}
-                    }
-                } catch(e) {}
-            }
-            return null;
-        }""")
-        if result:
-            logger.info("[sso] Got token from IndexedDB")
-            return result
-    except Exception as e:
-        logger.debug("[sso] IndexedDB token extraction failed: %s", e)
-
-    return None
+    return None, device
 
 
 async def _debug_screenshot(page) -> None:
