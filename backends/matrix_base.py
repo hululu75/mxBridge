@@ -229,6 +229,23 @@ class MatrixBackend(BaseBackend):
                             username=self.config.get("sso_username", ""),
                             password=self.config.get("password", ""),
                         )
+                        old_device_id = self.config.get("device_id") or ""
+                        if dev_id and dev_id != old_device_id:
+                            logger.info("[%s] Device ID changed: %s -> %s, clearing crypto store", self.name, old_device_id, dev_id)
+                            self._client = None
+                            if old_device_id:
+                                import glob as _glob
+                                import shutil
+                                for db_file in _glob.glob(os.path.join(store_path, "*.db")):
+                                    logger.info("[%s] Removing old store: %s", self.name, db_file)
+                                    os.remove(db_file)
+                            self._client = AsyncClient(
+                                homeserver=self.config["homeserver"],
+                                user=self.config["user_id"],
+                                device_id=dev_id,
+                                store_path=store_path,
+                                config=client_config,
+                            )
                         self._client.restore_login(
                             user_id=self.config["user_id"],
                             device_id=dev_id,
@@ -236,6 +253,7 @@ class MatrixBackend(BaseBackend):
                         )
                         self.config["access_token"] = token
                         self.config["device_id"] = dev_id
+                        await self._persist_device_id()
                     except Exception as e:
                         raise RuntimeError(f"SSO login failed for {self.name}: {e}")
                 else:
@@ -298,12 +316,6 @@ class MatrixBackend(BaseBackend):
         return saved_token
 
     async def _persist_device_id(self) -> None:
-        """Write the newly assigned device_id back to the config file.
-
-        Reads the existing YAML (which keeps encrypted tokens intact), patches
-        only the device_id field for this backend's section, and writes it back
-        atomically.  The original file permissions are preserved.
-        """
         device_id = self.config.get("device_id")
         if not device_id:
             return
@@ -318,15 +330,18 @@ class MatrixBackend(BaseBackend):
                 file_config = yaml.safe_load(f) or {}
             section = file_config.get(self.name, {})
             section["device_id"] = device_id
+            access_token = self.config.get("access_token", "")
+            if access_token:
+                section["access_token"] = access_token
             file_config[self.name] = section
             tmp_path = self._config_path + ".tmp"
             with open(tmp_path, "w") as f:
                 yaml.dump(file_config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
             os.replace(tmp_path, self._config_path)
             os.chmod(self._config_path, stat.S_IRUSR | stat.S_IWUSR)
-            logger.info("[%s] device_id saved to %s", self.name, self._config_path)
+            logger.info("[%s] device_id + access_token saved to %s", self.name, self._config_path)
         except Exception as e:
-            logger.error("[%s] Failed to persist device_id: %s", self.name, e)
+            logger.error("[%s] Failed to persist config: %s", self.name, e)
 
     async def _import_keys_if_configured(self) -> None:
         key_file = self.config.get("key_import_file", "")

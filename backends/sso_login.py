@@ -129,6 +129,27 @@ async def sso_login(
     username: str = "",
     password: str = "",
 ) -> tuple[str, str]:
+    cached = _load_cached_token(homeserver)
+    if cached:
+        token = cached["access_token"]
+        dev_id = cached["device_id"]
+        logger.info("[sso] Using cached SSO token (device_id=%s)", dev_id)
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{homeserver}/_matrix/client/v3/account/whoami",
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        logger.info("[sso] Cached token valid for %s device=%s", body.get("user_id"), body.get("device_id"))
+                        return token, dev_id
+                    else:
+                        logger.info("[sso] Cached token invalid, re-login required")
+        except Exception as e:
+            logger.info("[sso] Cache validation failed: %s, re-login required", e)
+
     from playwright.async_api import async_playwright
 
     if not username:
