@@ -15,6 +15,7 @@ from nio import AsyncClient
 
 from backends.matrix_source import MatrixSourceBackend
 from backends.matrix_target import MatrixTargetBackend
+from backends.sso_login import sso_login
 from bridge.core import BridgeCore
 from bridge.crypto import decrypt_config, encrypt, is_encrypted
 from bridge.message_store import MessageStore
@@ -125,14 +126,40 @@ async def setup_credentials(config: dict, config_path: str, master_password: str
         section = config[section_key]
         homeserver = section["homeserver"]
         user_id = section["user_id"]
-        device_id = section.get("device_id") or ""  # empty → server assigns a fresh device_id
-        password = section.get("password", "") or getpass.getpass(f"[{section_key}] Password for {user_id}: ")
+        device_id = section.get("device_id") or ""
+        password = section.get("password", "")
 
         logger.info("[%s] Logging in as %s ...", section_key, user_id)
-        try:
-            access_token, actual_device_id = await _matrix_login(homeserver, user_id, password, device_id)
-        except Exception as e:
-            raise RuntimeError(f"Login failed for {section_key} ({user_id}): {e}")
+        access_token = None
+        actual_device_id = device_id
+
+        if password:
+            try:
+                access_token, actual_device_id = await _matrix_login(homeserver, user_id, password, device_id)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "m_unrecognized" in err_str or "login failed" in err_str:
+                    logger.warning("[%s] Password login not supported, trying SSO...", section_key)
+                else:
+                    raise RuntimeError(f"Login failed for {section_key} ({user_id}): {e}")
+
+        if not access_token:
+            element_url = config.get("element_url", "")
+            if not element_url:
+                raise RuntimeError(
+                    f"Password login failed for {section_key} ({user_id}). "
+                    "SSO login requires 'element_url' in the top-level config. "
+                    "Add: element_url: \"https://your-element-url\""
+                )
+            logger.info("[%s] Starting SSO login via %s ...", section_key, element_url)
+            access_token, actual_device_id = await sso_login(
+                homeserver=homeserver,
+                element_url=element_url,
+                user_id=user_id,
+                device_id=device_id,
+                username=section.get("sso_username", ""),
+                password=password,
+            )
         logger.info("[%s] Login successful, device_id=%s", section_key, actual_device_id)
 
         key_file = input(f"[{section_key}] Path to encryption key file (Enter to skip): ").strip()

@@ -216,29 +216,38 @@ class MatrixBackend(BaseBackend):
         else:
             password = self.config.get("password", "")
             if not password:
-                password = getpass.getpass(f"[{self.name}] Password for {self.config['user_id']}: ")
-            if not password:
+                element_url = self.config.get("element_url", "")
+                if element_url:
+                    logger.info("[%s] No password configured, using SSO login...", self.name)
+                    try:
+                        from backends.sso_login import sso_login
+                        token, dev_id = await sso_login(
+                            homeserver=self.config["homeserver"],
+                            element_url=element_url,
+                            user_id=self.config["user_id"],
+                            device_id=self.config.get("device_id") or "",
+                            username=self.config.get("sso_username", ""),
+                            password=self.config.get("password", ""),
+                        )
+                        self._client.restore_login(
+                            user_id=self.config["user_id"],
+                            device_id=dev_id,
+                            access_token=token,
+                        )
+                        self.config["access_token"] = token
+                        self.config["device_id"] = dev_id
+                    except Exception as e:
+                        raise RuntimeError(f"SSO login failed for {self.name}: {e}")
+                else:
+                    password = getpass.getpass(f"[{self.name}] Password for {self.config['user_id']}: ")
+
+            if not self._client.access_token and not password:
                 raise RuntimeError(f"No password provided for {self.name}")
-            resp = await self._client.login(password)
-            if getattr(resp, "access_token", None):
-                self._client.access_token = resp.access_token
-                assigned_device_id = getattr(resp, "device_id", None)
-                if assigned_device_id and not self.config.get("device_id"):
-                    self._client.device_id = assigned_device_id
-                    self.config["device_id"] = assigned_device_id
-                    logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
-                    await self._persist_device_id()
-                logger.info("[%s] Logged in successfully", self.name)
-            elif getattr(resp, "status_code", None) == "M_UNRECOGNIZED":
-                legacy_auth = {
-                    "type": "m.login.password",
-                    "user": self.config["user_id"],
-                    "password": password,
-                }
-                device_id_from_config = self.config.get("device_id") or ""
-                if device_id_from_config:
-                    legacy_auth["device_id"] = device_id_from_config
-                resp = await self._client.login_raw(legacy_auth)
+
+            if self._client.access_token:
+                logger.info("[%s] Logged in via SSO", self.name)
+            else:
+                resp = await self._client.login(password)
                 if getattr(resp, "access_token", None):
                     self._client.access_token = resp.access_token
                     assigned_device_id = getattr(resp, "device_id", None)
@@ -247,13 +256,32 @@ class MatrixBackend(BaseBackend):
                         self.config["device_id"] = assigned_device_id
                         logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
                         await self._persist_device_id()
-                    logger.info("[%s] Logged in successfully (legacy login format)", self.name)
+                    logger.info("[%s] Logged in successfully", self.name)
+                elif getattr(resp, "status_code", None) == "M_UNRECOGNIZED":
+                    legacy_auth = {
+                        "type": "m.login.password",
+                        "user": self.config["user_id"],
+                        "password": password,
+                    }
+                    device_id_from_config = self.config.get("device_id") or ""
+                    if device_id_from_config:
+                        legacy_auth["device_id"] = device_id_from_config
+                    resp = await self._client.login_raw(legacy_auth)
+                    if getattr(resp, "access_token", None):
+                        self._client.access_token = resp.access_token
+                        assigned_device_id = getattr(resp, "device_id", None)
+                        if assigned_device_id and not self.config.get("device_id"):
+                            self._client.device_id = assigned_device_id
+                            self.config["device_id"] = assigned_device_id
+                            logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
+                            await self._persist_device_id()
+                        logger.info("[%s] Logged in successfully (legacy login format)", self.name)
+                    else:
+                        logger.error("[%s] Login failed: %s", self.name, resp)
+                        raise RuntimeError(f"Login failed for {self.name}: {resp}")
                 else:
                     logger.error("[%s] Login failed: %s", self.name, resp)
                     raise RuntimeError(f"Login failed for {self.name}: {resp}")
-            else:
-                logger.error("[%s] Login failed: %s", self.name, resp)
-                raise RuntimeError(f"Login failed for {self.name}: {resp}")
 
         # Upload unconditionally: should_upload_keys may be stale when the
         # homeserver omits one_time_key_counts from the sync response.
@@ -324,9 +352,43 @@ class MatrixBackend(BaseBackend):
         resp = await client.whoami()
         if isinstance(resp, WhoamiResponse):
             logger.log(ALWAYS, "[%s] Auth verified: user=%s device=%s", self.name, resp.user_id, resp.device_id)
+        elif "M_UNKNOWN_TOKEN" in str(resp):
+            logger.log(ALWAYS, "[%s] Token expired, attempting SSO re-login...", self.name)
+            refreshed = await self._refresh_token_via_sso()
+            if refreshed:
+                resp2 = await client.whoami()
+                if isinstance(resp2, WhoamiResponse):
+                    logger.log(ALWAYS, "[%s] Re-auth verified: user=%s device=%s", self.name, resp2.user_id, resp2.device_id)
+                    return
+            raise RuntimeError(f"Auth check failed for {self.name}: {resp}")
         else:
             logger.log(ALWAYS, "[%s] Auth check failed: %s — check access_token and homeserver", self.name, resp)
             raise RuntimeError(f"Auth check failed for {self.name}: {resp}")
+
+    async def _refresh_token_via_sso(self) -> bool:
+        element_url = self.config.get("element_url", "")
+        if not element_url:
+            logger.error("[%s] No 'element_url' configured, cannot refresh token via SSO", self.name)
+            return False
+        try:
+            from backends.sso_login import sso_login
+            token, device_id = await sso_login(
+                homeserver=self.config["homeserver"],
+                element_url=element_url,
+                user_id=self.config["user_id"],
+                device_id=self.config.get("device_id") or "",
+                username=self.config.get("sso_username", ""),
+                password=self.config.get("password", ""),
+            )
+            self._client.access_token = token
+            self._client.device_id = device_id
+            self.config["access_token"] = token
+            self.config["device_id"] = device_id
+            logger.info("[%s] Token refreshed via SSO", self.name)
+            return True
+        except Exception as e:
+            logger.error("[%s] SSO token refresh failed: %s", self.name, e)
+            return False
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -509,11 +571,23 @@ class MatrixBackend(BaseBackend):
                             body = await tr.text()
                         except Exception:
                             body = "<unreadable>"
+                        if "M_UNKNOWN_TOKEN" in str(resp):
+                            logger.warning("[%s] Token expired during sync, attempting SSO re-login...", self.name)
+                            refreshed = await self._refresh_token_via_sso()
+                            if refreshed:
+                                backoff = 0
+                                continue
                         logger.warning(
                             "[%s] Sync error (HTTP %s): %s | body: %.500s",
                             self.name, status, resp, body,
                         )
                     else:
+                        if "M_UNKNOWN_TOKEN" in str(resp):
+                            logger.warning("[%s] Token expired during sync, attempting SSO re-login...", self.name)
+                            refreshed = await self._refresh_token_via_sso()
+                            if refreshed:
+                                backoff = 0
+                                continue
                         logger.warning("[%s] Sync error: %s", self.name, resp)
                     await asyncio.sleep(backoff)
             except Exception as e:
