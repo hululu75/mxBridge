@@ -26,6 +26,9 @@ source:
   access_token: ""
   password: ""
   device_id: ""                # Leave empty to let the server assign one (auto-saved back)
+  element_url: ""              # Element web URL for SSO login (e.g. https://element.example.com)
+  sso_username: ""             # SSO/Keycloak username
+  recovery_key: ""             # Element recovery key for device verification (e.g. EsT4 aBcD ...)
   store_path: "./store/source"
   handle_encrypted: true
   media_max_size: 52428800

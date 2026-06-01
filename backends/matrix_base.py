@@ -250,6 +250,7 @@ class MatrixBackend(BaseBackend):
                         device_id=self.config.get("device_id") or "",
                         username=self.config.get("sso_username", ""),
                         password=self.config.get("password", ""),
+                        recovery_key=self.config.get("recovery_key", ""),
                     )
                     old_device_id = self.config.get("device_id") or ""
                     if dev_id and dev_id != old_device_id:
@@ -417,6 +418,7 @@ class MatrixBackend(BaseBackend):
                 device_id=self.config.get("device_id") or "",
                 username=self.config.get("sso_username", ""),
                 password=self.config.get("password", ""),
+                recovery_key=self.config.get("recovery_key", ""),
             )
             self._client.access_token = token
             self._client.device_id = device_id

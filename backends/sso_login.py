@@ -128,6 +128,7 @@ async def sso_login(
     device_id: str = "",
     username: str = "",
     password: str = "",
+    recovery_key: str = "",
 ) -> tuple[str, str]:
     cached = _load_cached_token(homeserver)
     if cached:
@@ -169,7 +170,7 @@ async def sso_login(
 
         try:
             token, device = await asyncio.wait_for(
-                _do_sso_flow(page, element_url, username, password, user_id, device_id, homeserver),
+                _do_sso_flow(page, element_url, username, password, user_id, device_id, homeserver, recovery_key),
                 timeout=180,
             )
         except Exception:
@@ -198,6 +199,7 @@ async def _do_sso_flow(
     user_id: str,
     device_id: str,
     homeserver: str = "",
+    recovery_key: str = "",
 ) -> tuple[Optional[str], str]:
     token = None
     device = device_id
@@ -305,7 +307,7 @@ async def _do_sso_flow(
         await asyncio.sleep(2)
 
     if not token:
-        await _handle_post_login_page(page, element_url)
+        await _handle_post_login_page(page, element_url, recovery_key)
 
     done_selectors = ["button:has-text('Done')", "a:has-text('Done')"]
     for sel in done_selectors:
@@ -445,7 +447,7 @@ async def _do_sso_flow(
     return token, device
 
 
-async def _handle_post_login_page(page, element_url: str = "") -> None:
+async def _handle_post_login_page(page, element_url: str = "", recovery_key: str = "") -> None:
     current_url = page.url
     logger.info("[sso] Post-login URL: %s", current_url)
     element_host = element_url.rstrip("/").split("//")[-1].split("/")[0] if element_url else ""
@@ -479,17 +481,17 @@ async def _handle_post_login_page(page, element_url: str = "") -> None:
 
     if "recovery key" in page_text.lower() or "confirm your digital identity" in page_text.lower():
         logger.info("[sso] Device verification page detected")
-        use_rk = page.locator("button:has-text('Use recovery key'), a:has-text('Use recovery key')")
-        try:
-            if await use_rk.first.is_visible(timeout=1000):
-                await use_rk.first.click()
-                logger.info("[sso] Clicked 'Use recovery key'")
-                await asyncio.sleep(2)
-        except Exception:
-            pass
-
-        recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
+        if not recovery_key:
+            recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
         if recovery_key:
+            use_rk = page.locator("button:has-text('Use recovery key'), a:has-text('Use recovery key')")
+            try:
+                if await use_rk.first.is_visible(timeout=1000):
+                    await use_rk.first.click()
+                    logger.info("[sso] Clicked 'Use recovery key'")
+                    await asyncio.sleep(2)
+            except Exception:
+                pass
             for sel in _RK_INPUT_SELECTORS:
                 try:
                     el = page.locator(sel).first
@@ -509,17 +511,18 @@ async def _handle_post_login_page(page, element_url: str = "") -> None:
                         break
                 except Exception:
                     continue
-
-        for sel in _SKIP_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info("[sso] Clicked skip: %s", sel)
-                    await asyncio.sleep(3)
-                    break
-            except Exception:
-                continue
+        else:
+            logger.warning("[sso] No recovery key provided, trying to skip...")
+            for sel in _SKIP_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click()
+                        logger.info("[sso] Clicked skip: %s", sel)
+                        await asyncio.sleep(3)
+                        break
+                except Exception:
+                    continue
 
         await asyncio.sleep(3)
         await _debug_screenshot(page)
