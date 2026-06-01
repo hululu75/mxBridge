@@ -334,8 +334,8 @@ async def _do_sso_flow(
                 return null;
             }""")
             if result:
-                logger.info("[sso] Got token from IndexedDB (len=%d)", len(result))
-                token = result
+                logger.info("[sso] Got token from IndexedDB type=%s len=%s repr=%r", type(result).__name__, len(result) if hasattr(result, '__len__') else '?', repr(result)[:50])
+                token = str(result)
             else:
                 logger.info("[sso] No token found in IndexedDB")
         except Exception as e:
