@@ -294,96 +294,50 @@ async def _do_sso_flow(
                 break
 
     if not token:
-        try:
-            ls_dump = await page.evaluate("""() => {
-                const result = {};
-                for (let i = 0; i < localStorage.length; i++) {
-                    const k = localStorage.key(i);
-                    result[k] = localStorage.getItem(k).substring(0, 200);
-                }
-                return result;
-            }""")
-            logger.info("[sso] localStorage keys: %s", list(ls_dump.keys()) if ls_dump else "empty")
-            for k, v in (ls_dump or {}).items():
-                logger.info("[sso]   %s = %.100s", k, v)
-        except Exception as e:
-            logger.debug("[sso] localStorage dump failed: %s", e)
+        logger.info("[sso] No token from initial requests, trying route interception + reload...")
+        intercepted_token = None
 
-    if not token:
-        try:
-            result = await page.evaluate("""async () => {
-                const dbs = await indexedDB.databases();
-                for (const dbInfo of dbs) {
-                    try {
-                        const idb = await new Promise((resolve, reject) => {
-                            const req = indexedDB.open(dbInfo.name);
-                            req.onsuccess = () => resolve(req.result);
-                            req.onerror = () => resolve(null);
-                        });
-                        if (!idb) continue;
-                        for (const name of idb.objectStoreNames) {
-                            try {
-                                const tx = idb.transaction(name, 'readonly');
-                                const store = tx.objectStore(name);
-                                const items = await new Promise((resolve) => {
-                                    const req = store.getAll();
-                                    req.onsuccess = () => resolve(req.result);
-                                    req.onerror = () => resolve([]);
-                                });
-                                for (const item of items) {
-                                    if (!item) continue;
-                                    const obj = item.value !== undefined ? item.value : item;
-                                    if (typeof obj === 'string' && obj.length > 20) return obj;
-                                    if (typeof obj === 'object' && obj !== null) {
-                                        for (const [k, v] of Object.entries(obj)) {
-                                            if (typeof v === 'string' && v.length > 20 && !k.includes('filter') && !k.includes('event')) return v;
-                                        }
-                                    }
-                                }
-                            } catch(e) {}
-                        }
-                    } catch(e) {}
-                }
-                return null;
-            }""")
-            if result:
-                logger.info("[sso] Got token from IndexedDB type=%s len=%s repr=%r", type(result).__name__, len(result) if hasattr(result, '__len__') else '?', repr(result)[:50])
-                token = str(result)
-            else:
-                logger.info("[sso] No token found in IndexedDB")
-        except Exception as e:
-            logger.debug("[sso] IndexedDB scan failed: %s", e)
+        async def route_handler(route):
+            nonlocal intercepted_token
+            headers = route.request.headers
+            url = route.request.url
+            auth = headers.get("authorization", "")
+            if auth and len(auth) > 20:
+                logger.info("[sso] ROUTE intercepted auth header on %s: %s", url[:80], auth[:50])
+                if not intercepted_token:
+                    intercepted_token = auth
+            if "/_matrix/" in url and "/sync" in url:
+                logger.info("[sso] /sync request headers: %s", dict(headers))
+            await route.continue_()
 
-    if not token:
         try:
-            result = await page.evaluate("""async () => {
-                // Try to get token from matrixClient
-                const mx = window.matrixClient || window.mx_matrixClientPeg?.get();
-                if (mx) {
-                    if (typeof mx.getAccessToken === 'function') return mx.getAccessToken();
-                    if (mx.client && typeof mx.client.getAccessToken === 'function') return mx.client.getAccessToken();
-                    if (mx._http && mx._http.opts && mx._http.opts.accessToken) return mx._http.opts.accessToken;
-                }
-                // Try to call fetch to get whoami response which will show the token
-                return null;
-            }""")
-            if result:
-                logger.info("[sso] Got token from matrixClient")
-                token = result
-        except Exception:
-            pass
+            await page.route("**/_matrix/**", route_handler)
+            await page.route("**/sync**", route_handler)
+            logger.info("[sso] Routes set up, reloading page...")
+            await page.reload(wait_until="domcontentloaded")
+            logger.info("[sso] Page reloaded, waiting for /sync request...")
+            for _ in range(15):
+                await asyncio.sleep(2)
+                if intercepted_token:
+                    break
+            await page.unroute("**/_matrix/**", route_handler)
+            await page.unroute("**/sync**", route_handler)
+        except Exception as e:
+            logger.debug("[sso] Route interception failed: %s", e)
+
+        if intercepted_token:
+            candidate = intercepted_token
+            if candidate.lower().startswith("bearer "):
+                candidate = candidate[7:].strip()
+            logger.info("[sso] Got token via route interception (len=%d)", len(candidate))
+            token = candidate
+        else:
+            logger.info("[sso] Route interception found no auth header")
 
     if not token:
         try:
             cookies = await page.context.cookies()
-            logger.info("[sso] Cookies: %s", [(c['name'], c['value'][:30]) for c in cookies])
-            session_cookie = None
-            for c in cookies:
-                if 'session' in c['name'].lower() or 'sid' in c['name'].lower():
-                    session_cookie = c
-                    break
-            if session_cookie:
-                logger.info("[sso] Found session cookie: %s=%s", session_cookie['name'], session_cookie['value'][:20])
+            logger.info("[sso] All cookies: %s", [(c['name'], c['value'][:50], c['domain']) for c in cookies])
         except Exception as e:
             logger.debug("[sso] Cookie dump failed: %s", e)
 
@@ -397,103 +351,57 @@ async def _do_sso_flow(
             whoami_data = json.loads(whoami_text)
             if whoami_resp.status == 200 and "user_id" in whoami_data:
                 device = whoami_data.get("device_id", device)
-                logger.info("[sso] whoami confirmed: user=%s device=%s", whoami_data.get("user_id"), device)
+                logger.info("[sso] whoami OK: user=%s device=%s", whoami_data["user_id"], device)
         except Exception as e:
-            logger.debug("[sso] whoami via page.request failed: %s", e)
-
-    if not token:
-        try:
-            oidc_token = await page.evaluate("() => localStorage.getItem('mx_oidc_id_token')")
-            if oidc_token:
-                logger.info("[sso] OIDC id_token found (len=%d)", len(oidc_token))
-                token = oidc_token
-                logger.info("[sso] Using OIDC id_token as access_token")
-        except Exception as e:
-            logger.debug("[sso] OIDC id_token extraction failed: %s", e)
+            logger.debug("[sso] whoami failed: %s", e)
 
     if not token:
         try:
             result = await page.evaluate("""async () => {
-                const clientId = localStorage.getItem('mx_oidc_client_id');
-                const issuer = localStorage.getItem('mx_oidc_token_issuer');
-                const dbName = 'matrix-react-sdk';
-                const idb = await new Promise((resolve, reject) => {
-                    const req = indexedDB.open(dbName);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => resolve(null);
-                });
-                if (!idb) return null;
-                const storeNames = Array.from(idb.objectStoreNames);
-                const result = {stores: {}, clientId, issuer};
-                for (const storeName of storeNames) {
+                const peg = window.mxMatrixClientPeg || window.mx_matrixClientPeg;
+                if (peg) {
+                    const mc = typeof peg.get === 'function' ? peg.get() : null;
+                    if (mc) {
+                        if (typeof mc.getAccessToken === 'function') {
+                            const t = mc.getAccessToken();
+                            if (t) return t;
+                        }
+                        if (mc._http && mc._http.opts && mc._http.opts.accessToken) return mc._http.opts.accessToken;
+                    }
+                }
+                const wkeys = Object.getOwnPropertyNames(window).filter(k => 
+                    k.toLowerCase().includes('matrix') || k.toLowerCase().includes('peg') || k.toLowerCase().includes('client')
+                );
+                for (const key of wkeys) {
                     try {
-                        const tx = idb.transaction(storeName, 'readonly');
-                        const store = tx.objectStore(storeName);
-                        const keys = await new Promise((resolve) => {
-                            const req = store.getAllKeys();
-                            req.onsuccess = () => resolve(req.result || []);
-                            req.onerror = () => resolve([]);
-                        });
-                        result.stores[storeName] = keys.map(k => String(k).substring(0, 50));
-                        for (const key of keys) {
-                            const val = await new Promise((resolve) => {
-                                const req = store.get(key);
-                                req.onsuccess = () => resolve(req.result);
-                                req.onerror = () => resolve(null);
-                            });
-                            if (!val) continue;
-                            if (typeof val === 'object') {
-                                if (val.accessToken) return val.accessToken;
-                                if (val.access_token) return val.access_token;
-                                if (val.token && typeof val.token === 'string' && val.token.length > 10) return val.token;
-                                const json = JSON.stringify(val);
-                                if (json.includes('access_token')) {
-                                    const match = json.match(/"access_token"\\s*:\\s*"([^"]+)"/);
-                                    if (match) return match[1];
-                                }
-                                if (json.includes('accessToken')) {
-                                    const match = json.match(/"accessToken"\\s*:\\s*"([^"]+)"/);
-                                    if (match) return match[1];
+                        const obj = window[key];
+                        if (obj && typeof obj === 'object') {
+                            if (typeof obj.get === 'function') {
+                                const mc = obj.get();
+                                if (mc) {
+                                    if (typeof mc.getAccessToken === 'function') {
+                                        const t = mc.getAccessToken();
+                                        if (t) return 'found:' + key + ':' + t;
+                                    }
+                                    if (mc._http && mc._http.opts && mc._http.opts.accessToken) return 'found:' + key + ':' + mc._http.opts.accessToken;
                                 }
                             }
                         }
                     } catch(e) {}
                 }
-                return JSON.stringify(result);
-            }""")
-            if result and not result.startswith('{'):
-                logger.info("[sso] Got access token from matrix-react-sdk IDB")
-                token = result
-            else:
-                logger.info("[sso] IDB store scan: %s", (result or "null")[:500])
-        except Exception as e:
-            logger.debug("[sso] IDB detailed scan failed: %s", e)
-
-    if not token:
-        try:
-            result = await page.evaluate("""() => {
-                for (const key of Object.getOwnPropertyNames(window)) {
-                    if (key.toLowerCase().includes('matrix') || key.toLowerCase().includes('peg')) {
-                        try {
-                            const obj = window[key];
-                            if (obj && typeof obj === 'object' && obj.get) {
-                                const mc = obj.get();
-                                if (mc && mc._http && mc._http.opts && mc._http.opts.accessToken) {
-                                    return mc._http.opts.accessToken;
-                                }
-                            }
-                        } catch(e) {}
-                    }
-                }
-                return null;
+                return 'window_keys:' + JSON.stringify(wkeys);
             }""")
             if result:
-                logger.info("[sso] Got token from window matrixClient")
-                token = result
-            else:
-                logger.info("[sso] No matrixClient found in window")
+                if result.startswith('found:'):
+                    token = result.split(':', 2)[2]
+                    logger.info("[sso] Got token from window JS runtime")
+                elif result.startswith('window_keys:'):
+                    logger.info("[sso] Window keys with matrix/peg/client: %s", result[12:])
+                else:
+                    token = result
+                    logger.info("[sso] Got token from matrixClient.getAccessToken()")
         except Exception as e:
-            logger.debug("[sso] window scan failed: %s", e)
+            logger.debug("[sso] JS matrixClient search failed: %s", e)
 
     if not device:
         try:
