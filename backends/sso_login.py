@@ -363,33 +363,47 @@ async def _do_sso_flow(
     if not token:
         try:
             result = await page.evaluate("""async () => {
-                // Intercept the next Matrix API call to get the Authorization header
                 return new Promise((resolve) => {
+                    let resolved = false;
                     const origFetch = window.fetch;
                     window.fetch = function(...args) {
-                        const url = args[0] && args[0].url ? args[0].url : String(args[0]);
                         const opts = args[1] || {};
-                        const auth = opts.headers && (opts.headers.Authorization || opts.headers.authorization);
+                        const headers = opts.headers || {};
+                        const auth = headers.Authorization || headers.authorization || '';
                         if (auth && auth.startsWith('Bearer ')) {
-                            window.fetch = origFetch;
-                            resolve(auth.replace('Bearer ', ''));
+                            if (!resolved) {
+                                resolved = true;
+                                setTimeout(() => { window.fetch = origFetch; }, 100);
+                                return origFetch.apply(this, args).then(r => {
+                                    resolve(auth.replace('Bearer ', ''));
+                                    return r;
+                                });
+                            }
+                        }
+                        // Also check for cookie-based session auth
+                        const cookie = document.cookie || '';
+                        if (cookie.includes('sid=') || cookie.includes('session') || cookie.includes('oauth')) {
+                            if (!resolved) {
+                                resolved = true;
+                                setTimeout(() => { window.fetch = origFetch; resolve(null); }, 100);
+                            }
                         }
                         return origFetch.apply(this, args);
                     };
-                    // Trigger a sync
-                    if (window.matrixClient) {
-                        window.matrixClient.startClient();
-                        setTimeout(() => { window.fetch = origFetch; resolve(null); }, 5000);
-                    } else {
-                        setTimeout(() => resolve(null), 3000);
-                    }
+                    // Trigger a whoami call
+                    const baseUrl = localStorage.getItem('mx_hs_url') || '';
+                    origFetch(baseUrl + '/_matrix/client/v3/account/whoami', {
+                        credentials: 'include',
+                        headers: {}
+                    }).catch(() => {});
+                    setTimeout(() => { window.fetch = origFetch; resolve(null); }, 8000);
                 });
             }""")
             if result:
-                logger.info("[sso] Got token from intercepting fetch")
+                logger.info("[sso] Got token from intercepting fetch (len=%s)", len(result) if result else 0)
                 token = result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("[sso] Fetch intercept failed: %s", e)
 
     if not device:
         try:
