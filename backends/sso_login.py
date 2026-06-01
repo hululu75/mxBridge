@@ -96,15 +96,25 @@ async def _do_sso_flow(
     async def on_response(response):
         nonlocal token, device
         url = response.url
-        if "/_matrix/client/" in url and "/sync" not in url:
-            try:
-                body = await response.text()
-                data = json.loads(body)
-                if "access_token" in data:
-                    token = data["access_token"]
-                    device = data.get("device_id", device)
-            except Exception:
-                pass
+        try:
+            if "access_token=" in url or "login_token=" in url:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(url).fragment if "#" in url else urlparse(url).query)
+                for key in ("access_token", "login_token", "token"):
+                    if key in qs:
+                        token = qs[key][0]
+                        break
+            if "/_matrix/client/" in url:
+                try:
+                    body = await response.text()
+                    data = json.loads(body)
+                    if "access_token" in data:
+                        token = data["access_token"]
+                        device = data.get("device_id", device)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     page.on("response", on_response)
 
@@ -163,10 +173,64 @@ async def _do_sso_flow(
 
     if not token:
         logger.info("[sso] Waiting for access_token from network requests...")
-        for _ in range(20):
+        for _ in range(30):
             await asyncio.sleep(2)
+            current_url = page.url
+            if "access_token=" in current_url or "login_token=" in current_url:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(current_url).fragment if "#" in current_url else urlparse(current_url).query)
+                for key in ("access_token", "login_token", "token"):
+                    if key in qs:
+                        token = qs[key][0]
+                        break
             if token:
                 break
+
+    if not token:
+        try:
+            token = await page.evaluate("""() => {
+                try {
+                    const d = localStorage.getItem('matrix-sdk-session');
+                    if (d) return JSON.parse(d).accessToken;
+                } catch(e) {}
+                return null;
+            }""")
+        except Exception:
+            pass
+
+    if not token:
+        try:
+            result = await page.evaluate("""async () => {
+                try {
+                    const idb = await new Promise((resolve, reject) => {
+                        const req = indexedDB.open('matrix-react-sdk_session');
+                        req.onupgradeneeded = (e) => {
+                            const db = e.target.result;
+                            if (!db.objectStoreNames.contains('session')) {
+                                db.createObjectStore('session');
+                            }
+                        };
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => reject(req.error);
+                    });
+                    if (!idb.objectStoreNames.contains('session')) return null;
+                    const tx = idb.transaction('session', 'readonly');
+                    const store = tx.objectStore('session');
+                    return new Promise((resolve) => {
+                        const req = store.get('sessionId');
+                        req.onsuccess = () => {
+                            const val = req.result;
+                            if (val && val.session) resolve(val.session.accessToken || val.session.access_token);
+                            else resolve(null);
+                        };
+                        req.onerror = () => resolve(null);
+                    });
+                } catch(e) { return null; }
+            }""")
+            if result:
+                token = result
+        except Exception:
+            pass
 
     return token, device
 
