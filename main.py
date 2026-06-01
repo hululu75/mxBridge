@@ -76,6 +76,19 @@ async def _matrix_login(homeserver: str, user_id: str, password: str, device_id:
         resp = await client.login(password)
         if hasattr(resp, "access_token"):
             return resp.access_token, resp.device_id
+
+        if getattr(resp, "status_code", None) == "M_UNRECOGNIZED":
+            legacy_auth = {
+                "type": "m.login.password",
+                "user": user_id,
+                "password": password,
+            }
+            if device_id:
+                legacy_auth["device_id"] = device_id
+            resp = await client.login_raw(legacy_auth)
+            if hasattr(resp, "access_token"):
+                return resp.access_token, resp.device_id
+
         raise RuntimeError(str(resp))
     finally:
         await client.close()

@@ -168,6 +168,21 @@ async def _init_client(source_config: dict, state: StateManager) -> AsyncClient:
         if hasattr(resp, "access_token"):
             client.access_token = resp.access_token
             logger.info("Logged in successfully")
+        elif getattr(resp, "status_code", None) == "M_UNRECOGNIZED":
+            legacy_auth = {
+                "type": "m.login.password",
+                "user": source_config["user_id"],
+                "password": password,
+            }
+            device_id_config = source_config.get("device_id") or ""
+            if device_id_config:
+                legacy_auth["device_id"] = device_id_config
+            resp = await client.login_raw(legacy_auth)
+            if hasattr(resp, "access_token"):
+                client.access_token = resp.access_token
+                logger.info("Logged in successfully (legacy login format)")
+            else:
+                raise RuntimeError(f"Login failed: {resp}")
         else:
             raise RuntimeError(f"Login failed: {resp}")
 

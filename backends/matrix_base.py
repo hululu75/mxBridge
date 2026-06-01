@@ -220,7 +220,7 @@ class MatrixBackend(BaseBackend):
             if not password:
                 raise RuntimeError(f"No password provided for {self.name}")
             resp = await self._client.login(password)
-            if hasattr(resp, "access_token"):
+            if getattr(resp, "access_token", None):
                 self._client.access_token = resp.access_token
                 assigned_device_id = getattr(resp, "device_id", None)
                 if assigned_device_id and not self.config.get("device_id"):
@@ -229,6 +229,28 @@ class MatrixBackend(BaseBackend):
                     logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
                     await self._persist_device_id()
                 logger.info("[%s] Logged in successfully", self.name)
+            elif getattr(resp, "status_code", None) == "M_UNRECOGNIZED":
+                legacy_auth = {
+                    "type": "m.login.password",
+                    "user": self.config["user_id"],
+                    "password": password,
+                }
+                device_id_from_config = self.config.get("device_id") or ""
+                if device_id_from_config:
+                    legacy_auth["device_id"] = device_id_from_config
+                resp = await self._client.login_raw(legacy_auth)
+                if getattr(resp, "access_token", None):
+                    self._client.access_token = resp.access_token
+                    assigned_device_id = getattr(resp, "device_id", None)
+                    if assigned_device_id and not self.config.get("device_id"):
+                        self._client.device_id = assigned_device_id
+                        self.config["device_id"] = assigned_device_id
+                        logger.info("[%s] Server assigned device_id: %s", self.name, assigned_device_id)
+                        await self._persist_device_id()
+                    logger.info("[%s] Logged in successfully (legacy login format)", self.name)
+                else:
+                    logger.error("[%s] Login failed: %s", self.name, resp)
+                    raise RuntimeError(f"Login failed for {self.name}: {resp}")
             else:
                 logger.error("[%s] Login failed: %s", self.name, resp)
                 raise RuntimeError(f"Login failed for {self.name}: {resp}")
