@@ -285,13 +285,37 @@ async def _do_sso_flow(
                 const result = {};
                 for (let i = 0; i < localStorage.length; i++) {
                     const k = localStorage.key(i);
-                    result[k] = localStorage.getItem(k).substring(0, 100);
+                    result[k] = localStorage.getItem(k).substring(0, 200);
                 }
                 return result;
             }""")
             logger.info("[sso] localStorage keys: %s", list(ls_dump.keys()) if ls_dump else "empty")
+            for k, v in (ls_dump or {}).items():
+                logger.info("[sso]   %s = %.100s", k, v)
         except Exception as e:
             logger.debug("[sso] localStorage dump failed: %s", e)
+
+    if not token:
+        try:
+            idb_names = await page.evaluate("() => indexedDB.databases().then(d => d.map(x => x.name))")
+            logger.info("[sso] IndexedDB databases: %s", idb_names)
+        except Exception as e:
+            logger.debug("[sso] IndexedDB list failed: %s", e)
+
+    if not token:
+        try:
+            url_check = await page.evaluate("() => location.href")
+            logger.info("[sso] Current href: %s", url_check)
+            if "access_token=" in url_check or "loginToken=" in url_check or "token=" in url_check:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(url_check).fragment if "#" in url_check else urlparse(url_check).query)
+                for key in ("access_token", "loginToken", "login_token", "token"):
+                    if key in qs:
+                        token = qs[key][0]
+                        logger.info("[sso] Got token from URL")
+                        break
+        except Exception as e:
+            logger.debug("[sso] URL check failed: %s", e)
 
     if not token:
         token = await _extract_token_from_browser(page)
