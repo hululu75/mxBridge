@@ -144,7 +144,12 @@ async def sso_login(
                 ) as resp:
                     if resp.status == 200:
                         body = await resp.json()
-                        logger.info("[sso] Cached token valid for %s device=%s", body.get("user_id"), body.get("device_id"))
+                        confirmed = body.get("device_id", dev_id)
+                        if confirmed != dev_id:
+                            logger.info("[sso] Cached device_id corrected via whoami: %s -> %s", dev_id, confirmed)
+                            dev_id = confirmed
+                            _save_cached_token(homeserver, token, dev_id)
+                        logger.info("[sso] Cached token valid for %s device=%s", body.get("user_id"), dev_id)
                         return token, dev_id
                     else:
                         logger.info("[sso] Cached token invalid, re-login required")
@@ -184,6 +189,23 @@ async def sso_login(
 
     if not token:
         raise RuntimeError("SSO login failed: no access_token obtained")
+
+    # Confirm the real device_id from the server — localStorage may hold a stale value.
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{homeserver.rstrip('/')}/_matrix/client/v3/account/whoami",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as resp:
+                if resp.status == 200:
+                    body = await resp.json()
+                    confirmed = body.get("device_id", "")
+                    if confirmed and confirmed != device:
+                        logger.info("[sso] device_id corrected via whoami: %s -> %s", device, confirmed)
+                        device = confirmed
+    except Exception as e:
+        logger.warning("[sso] Post-login whoami failed: %s", e)
 
     _save_cached_token(homeserver, token, device)
     logger.info("[sso] Login successful, device_id=%s", device)
