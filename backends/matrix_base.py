@@ -207,13 +207,34 @@ class MatrixBackend(BaseBackend):
         access_token = self.config.get("access_token", "")
         if access_token:
             access_token = access_token.strip()
-            self._client.restore_login(
-                user_id=self.config["user_id"],
-                device_id=self.config.get("device_id") or "",
-                access_token=access_token,
-            )
-            logger.log(ALWAYS, "[%s] Restored login with access_token", self.name)
-        else:
+            device_id_val = self.config.get("device_id") or ""
+            if not device_id_val:
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            f"{self.config['homeserver']}/_matrix/client/v3/account/whoami",
+                            headers={"Authorization": f"Bearer {access_token}"},
+                        ) as resp:
+                            if resp.status == 200:
+                                body = await resp.json()
+                                device_id_val = body.get("device_id", "")
+                                if device_id_val:
+                                    self.config["device_id"] = device_id_val
+                                    logger.info("[%s] Discovered device_id via whoami: %s", self.name, device_id_val)
+                except Exception as e:
+                    logger.debug("[%s] whoami for device_id failed: %s", self.name, e)
+            if not device_id_val:
+                logger.info("[%s] access_token present but no device_id, falling back to SSO", self.name)
+                access_token = ""
+            else:
+                self._client.restore_login(
+                    user_id=self.config["user_id"],
+                    device_id=device_id_val,
+                    access_token=access_token,
+                )
+                logger.log(ALWAYS, "[%s] Restored login with access_token (device=%s)", self.name, device_id_val)
+        if not access_token:
             password = self.config.get("password", "")
             if not password:
                 element_url = self.config.get("element_url", "")
