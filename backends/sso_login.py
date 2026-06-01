@@ -67,15 +67,19 @@ async def sso_login(
         context = await browser.new_context()
         page = await context.new_page()
 
-        token, device = await asyncio.wait_for(
-            _do_sso_flow(page, element_url, username, password, user_id, device_id),
-            timeout=180,
-        )
+        try:
+            token, device = await asyncio.wait_for(
+                _do_sso_flow(page, element_url, username, password, user_id, device_id),
+                timeout=180,
+            )
+        except Exception:
+            await _debug_screenshot(page)
+            raise
+
+        if not token:
+            await _debug_screenshot(page)
 
         await browser.close()
-
-    if not token:
-        raise RuntimeError("SSO login failed: no access_token obtained")
 
     _save_cached_token(homeserver, token, device)
     logger.info("[sso] Login successful, device_id=%s", device)
@@ -277,6 +281,19 @@ _INPUT_SELECTORS = {
 }
 
 
+async def _debug_screenshot(page) -> None:
+    try:
+        path = os.path.join(os.getcwd(), "sso_debug.png")
+        await page.screenshot(path=path, full_page=True)
+        logger.info("[sso] Screenshot saved to %s (URL: %s)", path, page.url)
+        title = await page.title()
+        body_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
+        logger.info("[sso] Page title: %s", title)
+        logger.info("[sso] Body text: %.200s", body_text)
+    except Exception as e:
+        logger.warning("[sso] Debug screenshot failed: %s", e)
+
+
 async def _fill_field(page, field_type: str, value: str) -> bool:
     for sel in _INPUT_SELECTORS.get(field_type, []):
         try:
@@ -308,23 +325,46 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
     await _fill_field(page, "password", password)
     await _click_submit(page)
 
-    await asyncio.sleep(3)
+    logger.info("[sso] Password submitted, waiting for next page...")
+    await asyncio.sleep(5)
     await page.wait_for_load_state("networkidle")
+    logger.info("[sso] Current URL after password: %s", page.url)
 
     current_url = page.url
+    if "error" in current_url.lower() or "invalid" in current_url.lower():
+        logger.error("[sso] Login may have failed, checking page...")
+        await _debug_screenshot(page)
+
     if "totp" in current_url.lower() or "otp" in current_url.lower():
         totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
         await _submit_totp(page, totp_code)
     else:
         totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
         if totp_code:
-            await _submit_totp(page, totp_code)
-            await asyncio.sleep(3)
-            await page.wait_for_load_state("networkidle")
+            filled = await _fill_field(page, "otp", totp_code)
+            if filled:
+                await _click_submit(page)
+                logger.info("[sso] TOTP submitted, waiting for redirect...")
+                await asyncio.sleep(5)
+                await page.wait_for_load_state("networkidle")
+                logger.info("[sso] Current URL after TOTP: %s", page.url)
+            else:
+                logger.warning("[sso] No OTP field found, current URL: %s", page.url)
+                await _debug_screenshot(page)
 
-    logger.info("[sso] Waiting for redirect...")
-    await asyncio.sleep(5)
+    logger.info("[sso] Waiting for final redirect...")
+    for i in range(10):
+        await asyncio.sleep(3)
+        new_url = page.url
+        logger.info("[sso] post-login URL check %d: %s", i, new_url)
+        if "web.collab" in new_url or "element" in new_url:
+            logger.info("[sso] Redirected back to Element")
+            await asyncio.sleep(5)
+            break
+        if "login.collab" in new_url:
+            logger.info("[sso] At callback proxy, waiting...")
     await page.wait_for_load_state("networkidle")
+    await _debug_screenshot(page)
 
 
 async def _submit_totp(page, totp_code: str) -> None:
