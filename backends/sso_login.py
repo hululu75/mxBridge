@@ -288,16 +288,19 @@ async def _do_sso_flow(
                     if key in qs:
                         token = qs[key][0]
                         break
-            if "/_matrix/client/" in url:
+            ct = response.headers.get("content-type", "")
+            if "json" in ct or "/_matrix/client/" in url:
                 try:
                     body = await response.text()
                     data = json.loads(body)
                     if "access_token" in data:
-                        token = data["access_token"]
-                        device = data.get("device_id", device)
-                        if data.get("refresh_token"):
+                        if "/_matrix/client/" in url:
+                            token = data["access_token"]
+                            device = data.get("device_id", device)
+                        # Capture refresh_token from any source (Matrix or OIDC/Keycloak)
+                        if data.get("refresh_token") and not refresh_token:
                             refresh_token = data["refresh_token"]
-                            logger.info("[sso] Captured refresh_token (len=%d)", len(refresh_token))
+                            logger.info("[sso] Captured refresh_token from %s (len=%d)", url[:80], len(refresh_token))
                 except Exception:
                     pass
         except Exception:
