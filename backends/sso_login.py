@@ -300,6 +300,7 @@ async def _handle_post_login_page(page) -> None:
         page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 1000) || ''")
     except Exception:
         pass
+    logger.info("[sso] page_text for verification check: %.200s", page_text)
 
     if "recovery key" in page_text.lower() or "confirm your digital identity" in page_text.lower():
         logger.info("[sso] Device verification page detected")
