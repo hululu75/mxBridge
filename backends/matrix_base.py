@@ -357,6 +357,9 @@ class MatrixBackend(BaseBackend):
             access_token = self.config.get("access_token", "")
             if access_token:
                 section["access_token"] = access_token
+            refresh_token = self.config.get("refresh_token", "")
+            if refresh_token:
+                section["refresh_token"] = refresh_token
             file_config[self.name] = section
             tmp_path = self._config_path + ".tmp"
             with open(tmp_path, "w") as f:
@@ -415,6 +418,21 @@ class MatrixBackend(BaseBackend):
             raise RuntimeError(f"Auth check failed for {self.name}: {resp}")
 
     async def _refresh_token_via_sso(self) -> bool:
+        # Try silent refresh_token first — avoids launching a browser.
+        refresh_token = self.config.get("refresh_token", "")
+        if refresh_token:
+            from backends.sso_login import _try_refresh_token, _save_cached_token
+            result = await _try_refresh_token(self.config["homeserver"], refresh_token)
+            if result:
+                new_token, new_refresh, _ = result
+                self._client.access_token = new_token
+                self.config["access_token"] = new_token
+                self.config["refresh_token"] = new_refresh
+                await self._persist_device_id()
+                logger.info("[%s] Token silently refreshed via refresh_token", self.name)
+                return True
+            logger.info("[%s] refresh_token expired, falling back to SSO browser login", self.name)
+
         element_url = self.config.get("element_url", "")
         if not element_url:
             logger.error("[%s] No 'element_url' configured, cannot refresh token via SSO", self.name)
@@ -435,7 +453,7 @@ class MatrixBackend(BaseBackend):
             self.config["access_token"] = token
             self.config["device_id"] = device_id
             await self._persist_device_id()
-            logger.info("[%s] Token refreshed via SSO", self.name)
+            logger.info("[%s] Token refreshed via SSO browser", self.name)
             return True
         except Exception as e:
             logger.error("[%s] SSO token refresh failed: %s", self.name, e)

@@ -107,18 +107,49 @@ def _load_cached_token(homeserver: str) -> Optional[dict]:
     return None
 
 
-def _save_cached_token(homeserver: str, access_token: str, device_id: str) -> None:
+def _save_cached_token(homeserver: str, access_token: str, device_id: str, refresh_token: str = "") -> None:
     path = os.path.join(os.getcwd(), SSO_TOKEN_FILE)
     data = {
         "homeserver": homeserver,
         "access_token": access_token,
         "device_id": device_id,
     }
+    if refresh_token:
+        data["refresh_token"] = refresh_token
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
     os.chmod(path, 0o600)
+
+
+async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tuple[str, str, str]]:
+    """Use refresh_token to silently get a new access_token.
+
+    Returns (access_token, refresh_token, device_id) or None on failure.
+    """
+    if not refresh_token:
+        return None
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{homeserver.rstrip('/')}/_matrix/client/v3/auth/refresh",
+                json={"refresh_token": refresh_token},
+            ) as resp:
+                if resp.status == 200:
+                    body = await resp.json()
+                    new_access = body.get("access_token", "")
+                    new_refresh = body.get("refresh_token", refresh_token)
+                    if new_access:
+                        logger.info("[sso] Token silently refreshed via refresh_token")
+                        return new_access, new_refresh, ""
+                else:
+                    text = await resp.text()
+                    logger.info("[sso] Refresh token rejected (HTTP %d): %s", resp.status, text[:100])
+    except Exception as e:
+        logger.debug("[sso] refresh_token attempt failed: %s", e)
+    return None
 
 
 async def sso_login(
@@ -134,6 +165,7 @@ async def sso_login(
     if cached:
         token = cached["access_token"]
         dev_id = cached["device_id"]
+        cached_refresh = cached.get("refresh_token", "")
         logger.info("[sso] Using cached SSO token (device_id=%s)", dev_id)
         try:
             import aiohttp
@@ -148,11 +180,17 @@ async def sso_login(
                         if confirmed != dev_id:
                             logger.info("[sso] Cached device_id corrected via whoami: %s -> %s", dev_id, confirmed)
                             dev_id = confirmed
-                            _save_cached_token(homeserver, token, dev_id)
+                            _save_cached_token(homeserver, token, dev_id, cached_refresh)
                         logger.info("[sso] Cached token valid for %s device=%s", body.get("user_id"), dev_id)
                         return token, dev_id
                     else:
-                        logger.info("[sso] Cached token invalid, re-login required")
+                        logger.info("[sso] Cached token invalid, trying refresh_token...")
+                        refreshed = await _try_refresh_token(homeserver, cached_refresh)
+                        if refreshed:
+                            new_token, new_refresh, _ = refreshed
+                            _save_cached_token(homeserver, new_token, dev_id, new_refresh)
+                            return new_token, dev_id
+                        logger.info("[sso] refresh_token also invalid, re-login required")
         except Exception as e:
             logger.info("[sso] Cache validation failed: %s, re-login required", e)
 
@@ -174,7 +212,7 @@ async def sso_login(
         page = await context.new_page()
 
         try:
-            token, device = await asyncio.wait_for(
+            token, device, refresh_token = await asyncio.wait_for(
                 _do_sso_flow(page, element_url, username, password, user_id, device_id, homeserver, recovery_key),
                 timeout=180,
             )
@@ -207,9 +245,8 @@ async def sso_login(
     except Exception as e:
         logger.warning("[sso] Post-login whoami failed: %s", e)
 
-    _save_cached_token(homeserver, token, device)
-    logger.info("[sso] Login successful, device_id=%s", device)
-    logger.info("[sso] Returning token type=%s len=%s device=%s", type(token).__name__, len(token) if token else 0, device)
+    _save_cached_token(homeserver, token, device, refresh_token)
+    logger.info("[sso] Login successful, device_id=%s refresh_token=%s", device, "yes" if refresh_token else "no")
     return token, device
 
 
@@ -222,9 +259,10 @@ async def _do_sso_flow(
     device_id: str,
     homeserver: str = "",
     recovery_key: str = "",
-) -> tuple[Optional[str], str]:
+) -> tuple[Optional[str], str, str]:
     token = None
     device = device_id
+    refresh_token = ""
     hs_prefix = homeserver.rstrip("/") if homeserver else ""
 
     async def on_request(request):
@@ -240,7 +278,7 @@ async def _do_sso_flow(
                 token = candidate
 
     async def on_response(response):
-        nonlocal token, device
+        nonlocal token, device, refresh_token
         url = response.url
         try:
             if "access_token=" in url or "login_token=" in url:
@@ -257,6 +295,9 @@ async def _do_sso_flow(
                     if "access_token" in data:
                         token = data["access_token"]
                         device = data.get("device_id", device)
+                        if data.get("refresh_token"):
+                            refresh_token = data["refresh_token"]
+                            logger.info("[sso] Captured refresh_token (len=%d)", len(refresh_token))
                 except Exception:
                     pass
         except Exception:
@@ -468,7 +509,7 @@ async def _do_sso_flow(
         except Exception:
             pass
 
-    return token, device
+    return token, device, refresh_token
 
 
 async def _handle_post_login_page(page, element_url: str = "", recovery_key: str = "") -> None:
