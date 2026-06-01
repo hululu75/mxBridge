@@ -23,6 +23,28 @@ from bridge.state import StateManager
 from bridge.web import WebServer
 
 ALWAYS = 60
+
+
+def _patch_nio_keys_upload() -> None:
+    """Make one_time_key_counts optional in the /keys/upload response schema.
+
+    Some homeservers (e.g. Keycloak-backed Synapse) omit this field, causing
+    nio to log a WARNING on every upload even though the upload succeeded.
+    """
+    from nio.responses import KeysUploadResponse, KeysUploadError, verify
+    from nio.schemas import Schemas
+
+    Schemas.keys_upload.pop("required", None)
+
+    schema = Schemas.keys_upload
+
+    @classmethod  # type: ignore[misc]
+    @verify(schema, KeysUploadError)
+    def from_dict(cls, parsed_dict):  # type: ignore[override]
+        counts = parsed_dict.get("one_time_key_counts") or {}
+        return cls(counts.get("curve25519", 0), counts.get("signed_curve25519", 0))
+
+    KeysUploadResponse.from_dict = from_dict
 logging.addLevelName(ALWAYS, "ALWAYS")
 
 logger = logging.getLogger("matrix_bridge")
@@ -278,6 +300,7 @@ def _auto_encrypt_plaintext_fields(
 
 
 async def main() -> None:
+    _patch_nio_keys_upload()
     config_path = os.environ.get("MXBRIDGE_CONFIG", "config.yaml")
     if len(sys.argv) > 1:
         config_path = sys.argv[1]

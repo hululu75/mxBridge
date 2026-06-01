@@ -434,6 +434,7 @@ class MatrixBackend(BaseBackend):
             self._client.device_id = device_id
             self.config["access_token"] = token
             self.config["device_id"] = device_id
+            await self._persist_device_id()
             logger.info("[%s] Token refreshed via SSO", self.name)
             return True
         except Exception as e:
@@ -589,6 +590,7 @@ class MatrixBackend(BaseBackend):
     async def _sync_loop(self) -> None:
         client = self._get_client()
         backoff = 0
+        _last_key_upload = 0.0
         while self._running:
             try:
                 resp = await client.sync(timeout=SYNC_TIMEOUT)
@@ -601,8 +603,10 @@ class MatrixBackend(BaseBackend):
                     try:
                         if client.outgoing_to_device_messages:
                             await client.send_to_device_messages()
-                        if client.should_upload_keys:
+                        now = time.monotonic()
+                        if client.should_upload_keys and now - _last_key_upload >= KEY_RECHECK_INTERVAL:
                             await client.keys_upload()
+                            _last_key_upload = now
                         if client.should_query_keys:
                             await client.keys_query()
                         if client.should_claim_keys:
