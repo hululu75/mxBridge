@@ -76,104 +76,91 @@ async def sso_login(
             await _debug_screenshot(page)
             raise
 
-        if not token:
-            await _debug_screenshot(page)
-
-        await browser.close()
-
-    _save_cached_token(homeserver, token, device)
-    logger.info("[sso] Login successful, device_id=%s", device)
-    return token, device
-
-
-async def _do_sso_flow(
-    page,
-    element_url: str,
-    username: str,
-    password: str,
-    user_id: str,
-    device_id: str,
-) -> tuple[Optional[str], str]:
-    token = None
-    device = device_id
-
-    async def on_response(response):
-        nonlocal token, device
-        url = response.url
-        try:
-            if "access_token=" in url or "login_token=" in url:
-                from urllib.parse import urlparse, parse_qs
-                qs = parse_qs(urlparse(url).fragment if "#" in url else urlparse(url).query)
-                for key in ("access_token", "login_token", "token"):
-                    if key in qs:
-                        token = qs[key][0]
-                        break
-            if "/_matrix/client/" in url:
-                try:
-                    body = await response.text()
-                    data = json.loads(body)
-                    if "access_token" in data:
-                        token = data["access_token"]
-                        device = data.get("device_id", device)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    page.on("response", on_response)
-
-    login_url = element_url.rstrip("/") + "/#/login"
-    logger.info("[sso] Opening %s ...", login_url)
-    await page.goto(login_url, wait_until="networkidle")
-    await asyncio.sleep(3)
-
-    for _round in range(15):
-        current_url = page.url
-        logger.info("[sso] round %d URL: %s", _round, current_url)
-
-        if "keycloak" in current_url.lower() or "auth" in current_url.lower():
-            await _fill_keycloak_form(page, username, password)
-            break
-
-        if "totp" in current_url.lower() or "otp" in current_url.lower():
-            totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
-            await _submit_totp(page, totp_code)
-            break
-
-        for sel in _NEXT_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info("[sso] Clicked: %s", sel)
-                    await asyncio.sleep(2)
-                    break
-            except Exception:
-                continue
-
-        for sel in _SSO_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info("[sso] Clicked: %s", sel)
-                    await asyncio.sleep(3)
-                    break
-            except Exception:
-                continue
-
-        for sel in _SUBMIT_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info("[sso] Clicked: %s", sel)
-                    await asyncio.sleep(3)
-                    break
-            except Exception:
-                continue
-
+    if not token:
         await asyncio.sleep(2)
+
+    current_url = page.url
+    logger.info("[sso] Pre-token check URL: %s", current_url)
+    page_text = ""
+    try:
+        page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 1000) || ''")
+    except Exception:
+        pass
+
+    if "recovery key" in page_text.lower() or "confirm your digital identity" in page_text.lower():
+        skip_selectors = [
+            "button:has-text('Skip')",
+            "button:has-text('Skip for now')",
+            "button:has-text('Later')",
+            "button:has-text('Not now')",
+            "button:has-text('Use another device')",
+        ]
+        skip_clicked = False
+        for sel in skip_selectors:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info("[sso] Clicked skip: %s", sel)
+                    skip_clicked = True
+                    await asyncio.sleep(3)
+                    break
+            except Exception:
+                continue
+
+        if not skip_clicked:
+            recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
+            if recovery_key:
+                rk_selectors = [
+                    "input[placeholder*='recovery']",
+                    "input[placeholder*='Recovery']",
+                    "input[placeholder*='key']",
+                    "input[placeholder*='Key']",
+                    "input[placeholder*='phrase']",
+                    "input[placeholder*='Phrase']",
+                    "input[type='text']",
+                    "input[type='password']",
+                    "textarea",
+                ]
+                for sel in rk_selectors:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.is_visible(timeout=500):
+                            await el.fill(recovery_key)
+                            break
+                    except Exception:
+                        continue
+                submit_selectors = [
+                    "button[type='submit']",
+                    "button:has-text('Continue')",
+                    "button:has-text('Verify')",
+                    "button:has-text('Submit')",
+                ]
+                for sel in submit_selectors:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.is_visible(timeout=500):
+                            await btn.click()
+                            logger.info("[sso] Submitted recovery key")
+                            await asyncio.sleep(5)
+                            await page.wait_for_load_state("networkidle")
+                            break
+                    except Exception:
+                        continue
+            else:
+                logger.info("[sso] Skipping device verification...")
+                for sel in skip_selectors:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.is_visible(timeout=500):
+                            await btn.click()
+                            logger.info("[sso] Clicked skip: %s", sel)
+                            await asyncio.sleep(3)
+                            break
+                    except Exception:
+                        continue
+
+        await asyncio.sleep(3)
 
     if not token:
         logger.info("[sso] Waiting for access_token from network requests...")
