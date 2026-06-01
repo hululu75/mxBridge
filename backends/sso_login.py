@@ -5,13 +5,11 @@ import getpass
 import json
 import logging
 import os
-import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 SSO_TOKEN_FILE = ".sso_token.json"
-SSO_TOKEN_MAX_AGE = 3600
 
 
 def _load_cached_token(homeserver: str) -> Optional[dict]:
@@ -52,10 +50,6 @@ async def sso_login(
     username: str = "",
     password: str = "",
 ) -> tuple[str, str]:
-    """Log in via Element Web SSO flow using Playwright.
-
-    Returns (access_token, device_id).
-    """
     from playwright.async_api import async_playwright
 
     if not username:
@@ -75,7 +69,7 @@ async def sso_login(
 
         token, device = await asyncio.wait_for(
             _do_sso_flow(page, element_url, username, password, user_id, device_id),
-            timeout=120,
+            timeout=180,
         )
 
         await browser.close()
@@ -114,211 +108,172 @@ async def _do_sso_flow(
 
     page.on("response", on_response)
 
-    logger.info("[sso] Opening %s ...", element_url)
-    await page.goto(element_url)
-
-    await page.wait_for_load_state("networkidle")
-    await asyncio.sleep(2)
-
-    sso_clicked = False
-
-    sso_selectors = [
-        "button[data-testid='sso-button']",
-        "button:has-text('SSO')",
-        "button:has-text('Single Sign-On')",
-        "button:has-text('Sign in with Single Sign-On')",
-        "button:has-text('Sign in with SSO')",
-        "button:has-text('Enterprise SSO')",
-        "button:has-text('OIDC')",
-        "button:has-text('Log in with Single Sign-On')",
-        "a:has-text('SSO')",
-        "a:has-text('Single Sign-On')",
-        "a:has-text('Sign in with Single Sign-On')",
-    ]
-
-    for sel in sso_selectors:
-        try:
-            btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2000):
-                await btn.click()
-                sso_clicked = True
-                logger.info("[sso] Clicked SSO button (%s)", sel)
-                break
-        except Exception:
-            continue
-
-    if not sso_clicked:
-        logger.warning("[sso] No SSO button found, waiting for page redirect...")
-        await asyncio.sleep(3)
-
+    login_url = element_url.rstrip("/") + "/#/login"
+    logger.info("[sso] Opening %s ...", login_url)
+    await page.goto(login_url, wait_until="networkidle")
     await asyncio.sleep(3)
-    await page.wait_for_load_state("networkidle")
 
-    current_url = page.url
-    logger.info("[sso] Current URL: %s", current_url)
+    for _round in range(15):
+        current_url = page.url
+        logger.info("[sso] round %d URL: %s", _round, current_url)
 
-    if "keycloak" in current_url.lower() or "auth" in current_url.lower() or "login" in current_url.lower():
-        await _fill_keycloak_form(page, username, password)
-    else:
-        for attempt in range(3):
+        if "keycloak" in current_url.lower() or "auth" in current_url.lower():
+            await _fill_keycloak_form(page, username, password)
+            break
+
+        if "totp" in current_url.lower() or "otp" in current_url.lower():
+            totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
+            await _submit_totp(page, totp_code)
+            break
+
+        for sel in _NEXT_SELECTORS:
             try:
-                user_selectors = [
-                    "#username",
-                    "input[name='username']",
-                    "input[type='text']:visible",
-                    "input[id*='user']",
-                    "input[id*='name']",
-                ]
-                for sel in user_selectors:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=1000):
-                        await el.fill(username)
-                        break
-
-                pass_selectors = [
-                    "#password",
-                    "input[name='password']",
-                    "input[type='password']",
-                ]
-                for sel in pass_selectors:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=1000):
-                        await el.fill(password)
-                        break
-
-                submit_selectors = [
-                    "button[type='submit']",
-                    "input[type='submit']",
-                    "button:has-text('Log in')",
-                    "button:has-text('Login')",
-                    "button:has-text('Sign in')",
-                    "button:has-text('Sign In')",
-                    "button:has-text('Continue')",
-                    "button:has-text('Submit')",
-                ]
-                for sel in submit_selectors:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=1000):
-                        await el.click()
-                        break
-
-                await asyncio.sleep(5)
-                await page.wait_for_load_state("networkidle")
-
-                new_url = page.url
-                if "element" in new_url.lower() or "cloud.collab" in new_url.lower():
-                    logger.info("[sso] Login form submitted, redirected to %s", new_url)
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info("[sso] Clicked: %s", sel)
+                    await asyncio.sleep(2)
                     break
+            except Exception:
+                continue
 
-            except Exception as e:
-                logger.debug("[sso] Attempt %d: %s", attempt + 1, e)
+        for sel in _SSO_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info("[sso] Clicked: %s", sel)
+                    await asyncio.sleep(3)
+                    break
+            except Exception:
+                continue
+
+        for sel in _SUBMIT_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info("[sso] Clicked: %s", sel)
+                    await asyncio.sleep(3)
+                    break
+            except Exception:
+                continue
+
+        await asyncio.sleep(2)
 
     if not token:
         logger.info("[sso] Waiting for access_token from network requests...")
-        for _ in range(15):
+        for _ in range(20):
             await asyncio.sleep(2)
             if token:
                 break
 
-    if not token:
-        try:
-            await page.goto(element_url + "/#/settings/all")
-            await asyncio.sleep(3)
-            await page.wait_for_load_state("networkidle")
-            for _ in range(10):
-                await asyncio.sleep(2)
-                if token:
-                    break
-        except Exception:
-            pass
-
     return token, device
+
+
+_SSO_SELECTORS = [
+    "button[data-testid='sso-button']",
+    "button:has-text('SSO')",
+    "button:has-text('Single Sign-On')",
+    "button:has-text('Sign in with Single Sign-On')",
+    "button:has-text('Sign in with SSO')",
+    "button:has-text('Enterprise SSO')",
+    "button:has-text('OIDC')",
+    "a:has-text('SSO')",
+    "a:has-text('Single Sign-On')",
+]
+
+_NEXT_SELECTORS = [
+    "button:has-text('Next')",
+    "button:has-text('Get started')",
+    "button:has-text('Continue')",
+    "button[data-testid='next-btn']",
+]
+
+_SUBMIT_SELECTORS = [
+    "button[data-testid='login-btn']",
+    "button[type='submit']",
+    "input[type='submit']",
+    "button:has-text('Log in')",
+    "button:has-text('Login')",
+    "button:has-text('Sign in')",
+    "button:has-text('Sign In')",
+    "button:has-text('Continue')",
+]
+
+_INPUT_SELECTORS = {
+    "username": ["#username", "input[name='username']", "input[id*='username']", "input[type='text']"],
+    "password": ["#password", "input[name='password']", "input[type='password']"],
+    "otp": [
+        "#otp", "input[name='otp']", "input[id*='otp']",
+        "input[id*='totp']", "input[name='totp']",
+        "input[autocomplete='one-time-code']",
+        "input[inputmode='numeric']",
+    ],
+}
+
+
+async def _fill_field(page, field_type: str, value: str) -> bool:
+    for sel in _INPUT_SELECTORS.get(field_type, []):
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=1000):
+                await el.fill(value)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _click_submit(page) -> bool:
+    for sel in _SUBMIT_SELECTORS:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=500):
+                await el.click()
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def _fill_keycloak_form(page, username: str, password: str) -> None:
     logger.info("[sso] Filling Keycloak login form...")
 
-    user_selectors = [
-        "#username",
-        "input[name='username']",
-        "input[id*='username']",
-        "input[type='text']",
-    ]
-    for sel in user_selectors:
-        try:
-            el = page.locator(sel).first
-            if await el.is_visible(timeout=2000):
-                await el.fill(username)
-                break
-        except Exception:
-            continue
-
-    pass_selectors = [
-        "#password",
-        "input[name='password']",
-        "input[type='password']",
-    ]
-    for sel in pass_selectors:
-        try:
-            el = page.locator(sel).first
-            if await el.is_visible(timeout=2000):
-                await el.fill(password)
-                break
-        except Exception:
-            continue
-
-    submit_selectors = [
-        "input[type='submit']",
-        "button[type='submit']",
-        "button:has-text('Log in')",
-        "button:has-text('Login')",
-        "button:has-text('Sign in')",
-        "button:has-text('Sign In')",
-    ]
-    for sel in submit_selectors:
-        try:
-            el = page.locator(sel).first
-            if await el.is_visible(timeout=1000):
-                await el.click()
-                break
-        except Exception:
-            continue
+    await _fill_field(page, "username", username)
+    await _fill_field(page, "password", password)
+    await _click_submit(page)
 
     await asyncio.sleep(3)
     await page.wait_for_load_state("networkidle")
 
-    totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
+    current_url = page.url
+    if "totp" in current_url.lower() or "otp" in current_url.lower():
+        totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
+        await _submit_totp(page, totp_code)
+    else:
+        totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
+        if totp_code:
+            await _submit_totp(page, totp_code)
+            await asyncio.sleep(3)
+            await page.wait_for_load_state("networkidle")
+
+    logger.info("[sso] Waiting for redirect...")
+    await asyncio.sleep(5)
+    await page.wait_for_load_state("networkidle")
+
+
+async def _submit_totp(page, totp_code: str) -> None:
     if not totp_code:
         logger.warning("[sso] No TOTP code entered")
         return
 
-    otp_selectors = [
-        "#otp",
-        "input[name='otp']",
-        "input[id*='otp']",
-        "input[id*='totp']",
-        "input[name='totp']",
-        "input[autocomplete='one-time-code']",
-        "input[inputmode='numeric']",
-    ]
-    for sel in otp_selectors:
-        try:
-            el = page.locator(sel).first
-            if await el.is_visible(timeout=2000):
-                await el.fill(totp_code)
-                break
-        except Exception:
-            continue
+    filled = await _fill_field(page, "otp", totp_code)
+    if not filled:
+        logger.warning("[sso] Could not find OTP input field")
+        return
 
-    for sel in submit_selectors:
-        try:
-            el = page.locator(sel).first
-            if await el.is_visible(timeout=1000):
-                await el.click()
-                break
-        except Exception:
-            continue
-
+    await _click_submit(page)
     logger.info("[sso] TOTP submitted, waiting for redirect...")
     await asyncio.sleep(5)
     await page.wait_for_load_state("networkidle")
