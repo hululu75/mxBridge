@@ -297,25 +297,98 @@ async def _do_sso_flow(
 
     if not token:
         try:
-            idb_names = await page.evaluate("() => indexedDB.databases().then(d => d.map(x => x.name))")
-            logger.info("[sso] IndexedDB databases: %s", idb_names)
+            result = await page.evaluate("""async () => {
+                const dbs = await indexedDB.databases();
+                for (const dbInfo of dbs) {
+                    try {
+                        const idb = await new Promise((resolve, reject) => {
+                            const req = indexedDB.open(dbInfo.name);
+                            req.onsuccess = () => resolve(req.result);
+                            req.onerror = () => resolve(null);
+                        });
+                        if (!idb) continue;
+                        for (const name of idb.objectStoreNames) {
+                            try {
+                                const tx = idb.transaction(name, 'readonly');
+                                const store = tx.objectStore(name);
+                                const items = await new Promise((resolve) => {
+                                    const req = store.getAll();
+                                    req.onsuccess = () => resolve(req.result);
+                                    req.onerror = () => resolve([]);
+                                });
+                                for (const item of items) {
+                                    if (!item) continue;
+                                    const obj = item.value !== undefined ? item.value : item;
+                                    if (typeof obj === 'string' && obj.length > 20) return obj;
+                                    if (typeof obj === 'object' && obj !== null) {
+                                        for (const [k, v] of Object.entries(obj)) {
+                                            if (typeof v === 'string' && v.length > 20 && !k.includes('filter') && !k.includes('event')) return v;
+                                        }
+                                    }
+                                }
+                            } catch(e) {}
+                        }
+                    } catch(e) {}
+                }
+                return null;
+            }""")
+            if result:
+                logger.info("[sso] Got token from IndexedDB (len=%d)", len(result))
+                return result
+            else:
+                logger.info("[sso] No token found in IndexedDB")
         except Exception as e:
-            logger.debug("[sso] IndexedDB list failed: %s", e)
+            logger.debug("[sso] IndexedDB scan failed: %s", e)
 
     if not token:
         try:
-            url_check = await page.evaluate("() => location.href")
-            logger.info("[sso] Current href: %s", url_check)
-            if "access_token=" in url_check or "loginToken=" in url_check or "token=" in url_check:
-                from urllib.parse import urlparse, parse_qs
-                qs = parse_qs(urlparse(url_check).fragment if "#" in url_check else urlparse(url_check).query)
-                for key in ("access_token", "loginToken", "login_token", "token"):
-                    if key in qs:
-                        token = qs[key][0]
-                        logger.info("[sso] Got token from URL")
-                        break
-        except Exception as e:
-            logger.debug("[sso] URL check failed: %s", e)
+            result = await page.evaluate("""async () => {
+                // Try to get token from matrixClient
+                const mx = window.matrixClient || window.mx_matrixClientPeg?.get();
+                if (mx) {
+                    if (typeof mx.getAccessToken === 'function') return mx.getAccessToken();
+                    if (mx.client && typeof mx.client.getAccessToken === 'function') return mx.client.getAccessToken();
+                    if (mx._http && mx._http.opts && mx._http.opts.accessToken) return mx._http.opts.accessToken;
+                }
+                // Try to call fetch to get whoami response which will show the token
+                return null;
+            }""")
+            if result:
+                logger.info("[sso] Got token from matrixClient")
+                return result
+        except Exception:
+            pass
+
+    if not token:
+        try:
+            result = await page.evaluate("""async () => {
+                // Intercept the next Matrix API call to get the Authorization header
+                return new Promise((resolve) => {
+                    const origFetch = window.fetch;
+                    window.fetch = function(...args) {
+                        const url = args[0] && args[0].url ? args[0].url : String(args[0]);
+                        const opts = args[1] || {};
+                        const auth = opts.headers && (opts.headers.Authorization || opts.headers.authorization);
+                        if (auth && auth.startsWith('Bearer ')) {
+                            window.fetch = origFetch;
+                            resolve(auth.replace('Bearer ', ''));
+                        }
+                        return origFetch.apply(this, args);
+                    };
+                    // Trigger a sync
+                    if (window.matrixClient) {
+                        window.matrixClient.startClient();
+                        setTimeout(() => { window.fetch = origFetch; resolve(null); }, 5000);
+                    } else {
+                        setTimeout(() => resolve(null), 3000);
+                    }
+                });
+            }""")
+            if result:
+                logger.info("[sso] Got token from intercepting fetch")
+                return result
+        except Exception:
+            pass
 
     if not token:
         token = await _extract_token_from_browser(page)
