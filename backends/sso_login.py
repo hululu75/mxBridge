@@ -384,16 +384,24 @@ async def _handle_post_login_page(page) -> None:
         await asyncio.sleep(3)
         await _debug_screenshot(page)
 
-    for sel in ["button:has-text('Done')", "a:has-text('Done')"]:
-        try:
-            btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2000):
-                await btn.click()
-                logger.info("[sso] Clicked 'Done' button")
-                await asyncio.sleep(5)
-                break
-        except Exception:
-            pass
+    try:
+        clicked = await page.evaluate("""() => {
+            const btns = document.querySelectorAll('button, a, [role="button"]');
+            for (const btn of btns) {
+                if (btn.innerText.trim() === 'Done') {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if clicked:
+            logger.info("[sso] Clicked 'Done' button via JS")
+            await asyncio.sleep(5)
+        else:
+            logger.info("[sso] No 'Done' button found via JS")
+    except Exception as e:
+        logger.debug("[sso] Done button click failed: %s", e)
 
 
 async def _extract_token_from_browser(page) -> Optional[str]:
