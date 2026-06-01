@@ -292,7 +292,7 @@ async def _handle_post_login_page(page) -> None:
         if "login.collab" in new_url:
             logger.info("[sso] At callback proxy, waiting...")
 
-    await page.wait_for_load_state("networkidle")
+    await page.wait_for_load_state("domcontentloaded")
     await _debug_screenshot(page)
 
     page_text = ""
@@ -341,7 +341,7 @@ async def _handle_post_login_page(page) -> None:
                             await btn.click()
                             logger.info("[sso] Submitted recovery key")
                             await asyncio.sleep(5)
-                            await page.wait_for_load_state("networkidle")
+                            await page.wait_for_load_state("domcontentloaded")
                             break
                     except Exception:
                         continue
@@ -476,7 +476,7 @@ async def _handle_consent_page(page) -> bool:
                 await btn.click()
                 logger.info("[sso] Clicked consent button: %s", sel)
                 await asyncio.sleep(5)
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
                 logger.info("[sso] URL after consent: %s", page.url)
                 return True
         except Exception:
@@ -519,7 +519,7 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
 
     logger.info("[sso] Password submitted, waiting for next page...")
     await asyncio.sleep(5)
-    await page.wait_for_load_state("networkidle")
+    await page.wait_for_load_state("domcontentloaded")
     logger.info("[sso] Current URL after password: %s", page.url)
 
     current_url = page.url
@@ -538,7 +538,7 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
                 await _click_submit(page)
                 logger.info("[sso] TOTP submitted, waiting for redirect...")
                 await asyncio.sleep(5)
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
                 logger.info("[sso] Current URL after TOTP: %s", page.url)
             else:
                 logger.warning("[sso] No OTP field found, current URL: %s", page.url)
@@ -558,7 +558,7 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
             break
         if "login.collab" in new_url:
             logger.info("[sso] At callback proxy, waiting...")
-    await page.wait_for_load_state("networkidle")
+    await page.wait_for_load_state("domcontentloaded")
     await _debug_screenshot(page)
 
 
@@ -575,4 +575,4 @@ async def _submit_totp(page, totp_code: str) -> None:
     await _click_submit(page)
     logger.info("[sso] TOTP submitted, waiting for redirect...")
     await asyncio.sleep(5)
-    await page.wait_for_load_state("networkidle")
+    await page.wait_for_load_state("domcontentloaded")
