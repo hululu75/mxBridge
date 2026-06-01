@@ -400,6 +400,102 @@ async def _do_sso_flow(
     return None, device
 
 
+async def _handle_post_login_page(page) -> None:
+    current_url = page.url
+    logger.info("[sso] Post-login URL: %s", current_url)
+
+    for i in range(15):
+        await asyncio.sleep(2)
+        new_url = page.url
+        logger.info("[sso] post-login check %d: %s", i, new_url)
+
+        if "consent" in new_url.lower():
+            await _handle_consent_page(page)
+            continue
+        if "web.collab" in new_url or "element" in new_url:
+            logger.info("[sso] Redirected back to Element")
+            await asyncio.sleep(5)
+            break
+        if "login.collab" in new_url:
+            logger.info("[sso] At callback proxy, waiting...")
+
+    await page.wait_for_load_state("domcontentloaded")
+    await _debug_screenshot(page)
+
+    page_text = ""
+    try:
+        page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 1000) || ''")
+    except Exception:
+        pass
+    logger.info("[sso] page_text for verification check: %.200s", page_text)
+
+    if "recovery key" in page_text.lower() or "confirm your digital identity" in page_text.lower():
+        logger.info("[sso] Device verification page detected")
+        use_rk = page.locator("button:has-text('Use recovery key'), a:has-text('Use recovery key')")
+        try:
+            if await use_rk.first.is_visible(timeout=1000):
+                await use_rk.first.click()
+                logger.info("[sso] Clicked 'Use recovery key'")
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        recovery_key = input("[sso] Enter recovery key (or press Enter to skip): ").strip()
+        if recovery_key:
+            for sel in _RK_INPUT_SELECTORS:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=500):
+                        await el.fill(recovery_key)
+                        break
+                except Exception:
+                    continue
+            for sel in _RK_SUBMIT_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click()
+                        logger.info("[sso] Submitted recovery key")
+                        await asyncio.sleep(5)
+                        await page.wait_for_load_state("domcontentloaded")
+                        break
+                except Exception:
+                    continue
+
+        for sel in _SKIP_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info("[sso] Clicked skip: %s", sel)
+                    await asyncio.sleep(3)
+                    break
+            except Exception:
+                continue
+
+        await asyncio.sleep(3)
+        await _debug_screenshot(page)
+
+    try:
+        clicked = await page.evaluate("""() => {
+            const btns = document.querySelectorAll('button, a, [role="button"]');
+            for (const btn of btns) {
+                if (btn.innerText.trim() === 'Done') {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if clicked:
+            logger.info("[sso] Clicked 'Done' button via JS")
+            await asyncio.sleep(5)
+        else:
+            logger.info("[sso] No 'Done' button found via JS")
+    except Exception as e:
+        logger.debug("[sso] Done button click failed: %s", e)
+
+
 async def _debug_screenshot(page) -> None:
     try:
         path = os.path.join(os.getcwd(), "sso_debug.png")
