@@ -180,6 +180,18 @@ async def _do_sso_flow(
     token = None
     device = device_id
 
+    async def on_request(request):
+        nonlocal token
+        if token:
+            return
+        url = request.url
+        if "/_matrix/" in url or "synapse" in url or "collab.lusis" in url:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer ") and len(auth) > 20:
+                candidate = auth[7:].strip()
+                logger.info("[sso] Captured Bearer token from request to %s (len=%d)", url[:80], len(candidate))
+                token = candidate
+
     async def on_response(response):
         nonlocal token, device
         url = response.url
@@ -203,6 +215,7 @@ async def _do_sso_flow(
         except Exception:
             pass
 
+    page.on("request", on_request)
     page.on("response", on_response)
 
     login_url = element_url.rstrip("/") + "/#/login"
@@ -364,27 +377,45 @@ async def _do_sso_flow(
         try:
             cookies = await page.context.cookies()
             logger.info("[sso] Cookies: %s", [(c['name'], c['value'][:30]) for c in cookies])
+            session_cookie = None
+            for c in cookies:
+                if 'session' in c['name'].lower() or 'sid' in c['name'].lower():
+                    session_cookie = c
+                    break
+            if session_cookie:
+                logger.info("[sso] Found session cookie: %s=%s", session_cookie['name'], session_cookie['value'][:20])
         except Exception as e:
             logger.debug("[sso] Cookie dump failed: %s", e)
 
     if not token:
         try:
-            whoami = await page.request.get(
+            whoami_resp = await page.request.get(
                 "https://cloud.collab.lusis.net/_matrix/client/v3/account/whoami"
             )
-            whoami_text = await whoami.text()
-            logger.info("[sso] whoami status=%s body=%s", whoami.status, whoami_text[:200])
-            if whoami.status == 200:
-                whoami_data = json.loads(whoami_text)
+            whoami_text = await whoami_resp.text()
+            logger.info("[sso] whoami status=%s body=%s", whoami_resp.status, whoami_text[:300])
+            whoami_data = json.loads(whoami_text)
+            if whoami_resp.status == 200 and "user_id" in whoami_data:
                 device = whoami_data.get("device_id", device)
+                logger.info("[sso] whoami confirmed: user=%s device=%s", whoami_data.get("user_id"), device)
         except Exception as e:
             logger.debug("[sso] whoami via page.request failed: %s", e)
 
     if not token:
         try:
+            oidc_token = await page.evaluate("() => localStorage.getItem('mx_oidc_id_token')")
+            if oidc_token:
+                logger.info("[sso] OIDC id_token found (len=%d)", len(oidc_token))
+                token = oidc_token
+                logger.info("[sso] Using OIDC id_token as access_token")
+        except Exception as e:
+            logger.debug("[sso] OIDC id_token extraction failed: %s", e)
+
+    if not token:
+        try:
             result = await page.evaluate("""async () => {
-                // MAS stores tokens in IndexedDB under the client_id key
                 const clientId = localStorage.getItem('mx_oidc_client_id');
+                const issuer = localStorage.getItem('mx_oidc_token_issuer');
                 const dbName = 'matrix-react-sdk';
                 const idb = await new Promise((resolve, reject) => {
                     const req = indexedDB.open(dbName);
@@ -392,58 +423,60 @@ async def _do_sso_flow(
                     req.onerror = () => resolve(null);
                 });
                 if (!idb) return null;
-                
-                // List all store names and scan them
                 const storeNames = Array.from(idb.objectStoreNames);
-                const results = {};
+                const result = {stores: {}, clientId, issuer};
                 for (const storeName of storeNames) {
                     try {
                         const tx = idb.transaction(storeName, 'readonly');
                         const store = tx.objectStore(storeName);
-                        const allKeys = await new Promise((resolve) => {
+                        const keys = await new Promise((resolve) => {
                             const req = store.getAllKeys();
-                            req.onsuccess = () => resolve(req.result);
+                            req.onsuccess = () => resolve(req.result || []);
                             req.onerror = () => resolve([]);
                         });
-                        results[storeName] = allKeys;
-                        for (const key of allKeys) {
+                        result.stores[storeName] = keys.map(k => String(k).substring(0, 50));
+                        for (const key of keys) {
                             const val = await new Promise((resolve) => {
                                 const req = store.get(key);
                                 req.onsuccess = () => resolve(req.result);
                                 req.onerror = () => resolve(null);
                             });
-                            if (val && typeof val === 'object') {
-                                if (val.access_token) return val.access_token;
+                            if (!val) continue;
+                            if (typeof val === 'object') {
                                 if (val.accessToken) return val.accessToken;
-                                if (val.token) return val.token;
+                                if (val.access_token) return val.access_token;
+                                if (val.token && typeof val.token === 'string' && val.token.length > 10) return val.token;
+                                const json = JSON.stringify(val);
+                                if (json.includes('access_token')) {
+                                    const match = json.match(/"access_token"\\s*:\\s*"([^"]+)"/);
+                                    if (match) return match[1];
+                                }
+                                if (json.includes('accessToken')) {
+                                    const match = json.match(/"accessToken"\\s*:\\s*"([^"]+)"/);
+                                    if (match) return match[1];
+                                }
                             }
                         }
                     } catch(e) {}
                 }
-                return JSON.stringify({stores: results, clientId});
+                return JSON.stringify(result);
             }""")
             if result and not result.startswith('{'):
                 logger.info("[sso] Got access token from matrix-react-sdk IDB")
                 token = result
             else:
-                logger.info("[sso] IDB store scan result: %s", (result or "null")[:300])
+                logger.info("[sso] IDB store scan: %s", (result or "null")[:500])
         except Exception as e:
             logger.debug("[sso] IDB detailed scan failed: %s", e)
 
     if not token:
         try:
             result = await page.evaluate("""() => {
-                const mx = window.mxMatrixClientPeg || window.mx_matrixClientPeg;
-                if (mx) {
-                    const mc = mx.get();
-                    if (mc && mc._http && mc._http.opts) return mc._http.opts.accessToken;
-                }
-                // Also try window.mxMatrixClientPeg directly
                 for (const key of Object.getOwnPropertyNames(window)) {
-                    if (key.includes('matrix') || key.includes('Matrix')) {
+                    if (key.toLowerCase().includes('matrix') || key.toLowerCase().includes('peg')) {
                         try {
                             const obj = window[key];
-                            if (obj && obj.get) {
+                            if (obj && typeof obj === 'object' && obj.get) {
                                 const mc = obj.get();
                                 if (mc && mc._http && mc._http.opts && mc._http.opts.accessToken) {
                                     return mc._http.opts.accessToken;
@@ -457,6 +490,8 @@ async def _do_sso_flow(
             if result:
                 logger.info("[sso] Got token from window matrixClient")
                 token = result
+            else:
+                logger.info("[sso] No matrixClient found in window")
         except Exception as e:
             logger.debug("[sso] window scan failed: %s", e)
 
@@ -466,7 +501,7 @@ async def _do_sso_flow(
         except Exception:
             pass
 
-    return None, device
+    return token, device
 
 
 async def _handle_post_login_page(page) -> None:
