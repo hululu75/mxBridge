@@ -70,6 +70,7 @@ class MatrixBackend(BaseBackend):
         self._call_cleanup_task: Optional[asyncio.Task] = None
         self._token_refresh_task: Optional[asyncio.Task] = None
         self._token_obtained_at: float = 0.0
+        self._matrix_refresh_unsupported: bool = False
         self._pending_encrypted: dict[str, dict] = {}
         self._pending_event_ids: set[str] = set()
         self._config_path = config_path
@@ -426,10 +427,13 @@ class MatrixBackend(BaseBackend):
     async def _refresh_token_via_sso(self) -> bool:
         # Try silent refresh_token first — avoids launching a browser.
         refresh_token = self.config.get("refresh_token", "")
-        if refresh_token:
+        if refresh_token and not self._matrix_refresh_unsupported:
             from backends.sso_login import _try_refresh_token, _save_cached_token
             result = await _try_refresh_token(self.config["homeserver"], refresh_token)
-            if result:
+            if result and result[0] == "unsupported":
+                self._matrix_refresh_unsupported = True
+                logger.info("[%s] Matrix refresh disabled for this session", self.name)
+            elif result:
                 new_token, new_refresh, _ = result
                 self._client.access_token = new_token
                 self.config["access_token"] = new_token
@@ -438,7 +442,8 @@ class MatrixBackend(BaseBackend):
                 await self._persist_device_id()
                 logger.info("[%s] Token silently refreshed via refresh_token", self.name)
                 return True
-            logger.info("[%s] refresh_token expired, falling back to SSO browser login", self.name)
+            else:
+                logger.info("[%s] refresh_token expired, falling back to SSO browser login", self.name)
 
         element_url = self.config.get("element_url", "")
         if not element_url:
@@ -472,18 +477,20 @@ class MatrixBackend(BaseBackend):
     # ---------------------------------------------------------------- lifecycle
 
     async def _periodic_token_refresh(self) -> None:
-        """Proactively refresh the token before it expires."""
-        REFRESH_INTERVAL = 240  # refresh every 4 minutes (before 5-minute expiry)
-        await asyncio.sleep(REFRESH_INTERVAL)
+        """Proactively refresh the token before it expires. Only runs if SSO is configured."""
+        if not self.config.get("element_url"):
+            return
+        REFRESH_INTERVAL = 240  # target: refresh at 4 minutes for a 5-minute token
+        await asyncio.sleep(30)   # short initial delay, then poll frequently
         while self._running:
             age = time.monotonic() - self._token_obtained_at
-            if age >= REFRESH_INTERVAL:
+            if self._token_obtained_at > 0 and age >= REFRESH_INTERVAL:
                 logger.info("[%s] Proactive token refresh (age=%.0fs)", self.name, age)
                 try:
                     await self._refresh_token_via_sso()
                 except Exception as e:
                     logger.error("[%s] Proactive token refresh failed: %s", self.name, e)
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
     async def stop(self) -> None:
         self._running = False

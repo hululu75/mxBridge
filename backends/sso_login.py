@@ -185,6 +185,9 @@ async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tu
                     if new_access:
                         logger.info("[sso] Token silently refreshed via Matrix refresh_token")
                         return new_access, new_refresh, ""
+                elif resp.status == 404:
+                    logger.info("[sso] Matrix refresh not supported by this homeserver (404), disabling")
+                    return "unsupported", "", ""
                 else:
                     text = await resp.text()
                     logger.info("[sso] Matrix refresh rejected (HTTP %d): %s", resp.status, text[:100])
@@ -227,11 +230,11 @@ async def sso_login(
                     else:
                         logger.info("[sso] Cached token invalid, trying refresh_token...")
                         refreshed = await _try_refresh_token(homeserver, cached_refresh)
-                        if refreshed:
+                        if refreshed and refreshed[0] != "unsupported":
                             new_token, new_refresh, _ = refreshed
                             _save_cached_token(homeserver, new_token, dev_id, new_refresh)
                             return new_token, dev_id, new_refresh
-                        logger.info("[sso] refresh_token also invalid, re-login required")
+                        logger.info("[sso] refresh_token failed, re-login required")
         except Exception as e:
             logger.info("[sso] Cache validation failed: %s, re-login required", e)
 
@@ -338,10 +341,19 @@ async def _do_sso_flow(
                         if "/_matrix/client/" in url:
                             token = data["access_token"]
                             device = data.get("device_id", device)
-                        # Capture refresh_token from any source (Matrix or OIDC/Keycloak)
-                        if data.get("refresh_token") and not refresh_token:
-                            refresh_token = data["refresh_token"]
-                            logger.info("[sso] Captured refresh_token from %s (len=%d)", url[:80], len(refresh_token))
+                        rt = data.get("refresh_token", "")
+                        if rt and not refresh_token:
+                            if "/_matrix/client/" not in url:
+                                # OIDC token endpoint — store with endpoint so we can refresh later
+                                refresh_token = json.dumps({
+                                    "refresh_token": rt,
+                                    "token_endpoint": url,
+                                    "client_id": "",
+                                })
+                                logger.info("[sso] Captured OIDC refresh_token from %s", url[:80])
+                            else:
+                                refresh_token = rt
+                                logger.info("[sso] Captured Matrix refresh_token (len=%d)", len(rt))
                 except Exception:
                     pass
         except Exception:
@@ -553,43 +565,57 @@ async def _do_sso_flow(
         except Exception:
             pass
 
-    # Extract OIDC session from Element's localStorage (oidc.user:{issuer}:{client_id})
-    if not refresh_token:
-        try:
-            oidc_json = await page.evaluate("""() => {
-                const keys = Object.keys(localStorage).filter(k => k.startsWith('oidc.user:'));
-                for (const key of keys) {
-                    try {
-                        const data = JSON.parse(localStorage.getItem(key));
-                        if (data && data.refresh_token) {
-                            const parts = key.split(':');
-                            return JSON.stringify({
-                                refresh_token: data.refresh_token,
-                                token_endpoint: (data.profile && data.profile.token_endpoint) || null,
-                                client_id: parts.length >= 3 ? parts[parts.length - 1] : null,
-                                expires_at: data.expires_at || null,
-                            });
+    # Always extract OIDC session from localStorage — overrides on_response capture
+    # because localStorage has the issuer needed to construct the token endpoint.
+    try:
+        oidc_json = await page.evaluate("""() => {
+            const keys = Object.keys(localStorage).filter(k => k.startsWith('oidc.user:'));
+            for (const key of keys) {
+                try {
+                    const data = JSON.parse(localStorage.getItem(key));
+                    if (data && data.refresh_token) {
+                        const issuer = (data.profile && data.profile.iss) || null;
+                        // Derive Keycloak token endpoint from issuer
+                        let token_endpoint = null;
+                        if (issuer) {
+                            if (issuer.includes('/realms/')) {
+                                token_endpoint = issuer + '/protocol/openid-connect/token';
+                            } else {
+                                token_endpoint = issuer + '/token';
+                            }
                         }
-                    } catch(e) {}
-                }
-                return null;
-            }""")
-            if oidc_json:
-                import json as _json
-                oidc_data = _json.loads(oidc_json)
-                refresh_token = oidc_data.get("refresh_token", "")
-                if refresh_token:
-                    logger.info("[sso] Captured OIDC refresh_token from localStorage (endpoint=%s)",
-                                oidc_data.get("token_endpoint", "unknown"))
-                    # Stash endpoint and client_id alongside the refresh_token
-                    if oidc_data.get("token_endpoint"):
-                        refresh_token = _json.dumps({
-                            "refresh_token": refresh_token,
-                            "token_endpoint": oidc_data["token_endpoint"],
-                            "client_id": oidc_data.get("client_id", ""),
-                        })
-        except Exception as e:
-            logger.debug("[sso] OIDC localStorage extraction failed: %s", e)
+                        // client_id is the part of the key after the issuer
+                        const prefix = 'oidc.user:';
+                        const client_id = issuer
+                            ? key.substring(prefix.length + issuer.length + 1)
+                            : null;
+                        return JSON.stringify({
+                            refresh_token: data.refresh_token,
+                            token_endpoint: token_endpoint,
+                            client_id: client_id || '',
+                        });
+                    }
+                } catch(e) {}
+            }
+            return null;
+        }""")
+        if oidc_json:
+            import json as _json
+            oidc_data = _json.loads(oidc_json)
+            rt = oidc_data.get("refresh_token", "")
+            ep = oidc_data.get("token_endpoint", "")
+            if rt and ep:
+                refresh_token = _json.dumps({
+                    "refresh_token": rt,
+                    "token_endpoint": ep,
+                    "client_id": oidc_data.get("client_id", ""),
+                })
+                logger.info("[sso] OIDC session from localStorage: endpoint=%s client_id=%s",
+                            ep, oidc_data.get("client_id", ""))
+            elif rt:
+                logger.info("[sso] OIDC refresh_token found but no token_endpoint in localStorage")
+    except Exception as e:
+        logger.debug("[sso] OIDC localStorage extraction failed: %s", e)
 
     return token, device, refresh_token
 
