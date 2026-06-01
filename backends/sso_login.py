@@ -260,6 +260,18 @@ async def _do_sso_flow(
     if not token:
         await _handle_post_login_page(page)
 
+    done_selectors = ["button:has-text('Done')", "a:has-text('Done')"]
+    for sel in done_selectors:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                logger.info("[sso] Clicked 'Done' button")
+                await asyncio.sleep(5)
+                break
+        except Exception:
+            pass
+
     if not token:
         logger.info("[sso] Waiting for access_token from network requests...")
         for _ in range(30):
@@ -376,77 +388,95 @@ async def _handle_post_login_page(page) -> None:
 async def _extract_token_from_browser(page) -> Optional[str]:
     try:
         result = await page.evaluate("""() => {
+            // Try all localStorage values
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                try {
+                    const v = JSON.parse(localStorage.getItem(k));
+                    if (v && typeof v === 'object') {
+                        for (const [key, val] of Object.entries(v)) {
+                            if (typeof val === 'string' && (val.startsWith('syt_') || val.startsWith('sso_') || val.startsWith('MDAxOG'))) return val;
+                        }
+                    }
+                    if (typeof v === 'string' && (v.startsWith('syt_') || v.startsWith('sso_') || v.startsWith('MDAxOG'))) return v;
+                } catch(e) {}
+            }
+            // Try sessionStorage
+            for (let i = 0; i < sessionStorage.length; i++) {
+                const k = sessionStorage.key(i);
+                try {
+                    const v = JSON.parse(sessionStorage.getItem(k));
+                    if (v && typeof v === 'object') {
+                        for (const [key, val] of Object.entries(v)) {
+                            if (typeof val === 'string' && (val.startsWith('syt_') || val.startsWith('sso_') || val.startsWith('MDAxOG'))) return val;
+                        }
+                    }
+                } catch(e) {}
+            }
+            // Try matrixClient
             try {
-                const d = localStorage.getItem('matrix-sdk-session');
-                if (d) {
-                    const parsed = JSON.parse(d);
-                    if (parsed.accessToken) return parsed.accessToken;
+                const mx = window.matrixClient || window.mx_matrixClientPeg;
+                if (mx) {
+                    if (typeof mx.getAccessToken === 'function') return mx.getAccessToken();
+                    if (mx._http && mx._http.opts && mx._http.opts.accessToken) return mx._http.opts.accessToken;
+                    if (mx.client && mx.client.getAccessToken) return mx.client.getAccessToken();
                 }
             } catch(e) {}
+            // Try React internals
             try {
-                const keys = Object.keys(localStorage);
-                for (const k of keys) {
-                    try {
-                        const v = JSON.parse(localStorage.getItem(k));
-                        if (v && v.accessToken) return v.accessToken;
-                        if (v && v.access_token) return v.access_token;
-                    } catch(e) {}
+                const rootEl = document.getElementById('root') || document.getElementById('matrixchat');
+                if (rootEl && rootEl._reactRootContainer) {
+                    // Can't easily extract from React fiber
                 }
-            } catch(e) {}
-            try {
-                const mx = window.matrixClient;
-                if (mx && mx.getAccessToken) return mx.getAccessToken();
-                if (mx && mx._http && mx._http.opts) return mx._http.opts.accessToken;
             } catch(e) {}
             return null;
         }""")
         if result:
-            logger.info("[sso] Got token from localStorage/matrixClient")
+            logger.info("[sso] Got token from browser storage")
             return result
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("[sso] Browser token extraction failed: %s", e)
 
     try:
         result = await page.evaluate("""async () => {
-            try {
-                const dbs = await indexedDB.databases();
-                for (const dbInfo of dbs) {
-                    try {
-                        const idb = await new Promise((resolve, reject) => {
-                            const req = indexedDB.open(dbInfo.name);
-                            req.onsuccess = () => resolve(req.result);
-                            req.onerror = () => resolve(null);
-                        });
-                        if (!idb) continue;
-                        for (const name of idb.objectStoreNames) {
-                            try {
-                                const tx = idb.transaction(name, 'readonly');
-                                const store = tx.objectStore(name);
-                                const items = await new Promise((resolve) => {
-                                    const req = store.getAll();
-                                    req.onsuccess = () => resolve(req.result);
-                                    req.onerror = () => resolve([]);
-                                });
-                                for (const item of items) {
-                                    const obj = item.value || item.session || item;
-                                    if (typeof obj === 'object' && obj) {
-                                        if (obj.accessToken) return obj.accessToken;
-                                        if (obj.access_token) return obj.access_token;
-                                        if (obj.token) return obj.token;
+            const dbs = await indexedDB.databases();
+            for (const dbInfo of dbs) {
+                try {
+                    const idb = await new Promise((resolve, reject) => {
+                        const req = indexedDB.open(dbInfo.name);
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => resolve(null);
+                    });
+                    if (!idb) continue;
+                    for (const name of idb.objectStoreNames) {
+                        try {
+                            const tx = idb.transaction(name, 'readonly');
+                            const store = tx.objectStore(name);
+                            const items = await new Promise((resolve) => {
+                                const req = store.getAll();
+                                req.onsuccess = () => resolve(req.result);
+                                req.onerror = () => resolve([]);
+                            });
+                            for (const item of items) {
+                                const obj = item.value || item.session || item;
+                                if (typeof obj === 'object' && obj) {
+                                    for (const [k, v] of Object.entries(obj)) {
+                                        if (typeof v === 'string' && (v.startsWith('syt_') || v.startsWith('MDAxOG'))) return v;
                                     }
                                 }
-                            } catch(e) {}
-                        }
-                    } catch(e) {}
-                }
-            } catch(e) {}
+                                if (typeof item === 'string' && (item.startsWith('syt_') || item.startsWith('MDAxOG'))) return item;
+                            }
+                        } catch(e) {}
+                    }
+                } catch(e) {}
+            }
             return null;
         }""")
         if result:
             logger.info("[sso] Got token from IndexedDB")
             return result
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("[sso] IndexedDB token extraction failed: %s", e)
 
     return None
 
