@@ -243,7 +243,7 @@ class MatrixBackend(BaseBackend):
                 logger.info("[%s] Using SSO login...", self.name)
                 try:
                     from backends.sso_login import sso_login
-                    token, dev_id = await sso_login(
+                    token, dev_id, refresh_tok = await sso_login(
                         homeserver=self.config["homeserver"],
                         element_url=element_url,
                         user_id=self.config["user_id"],
@@ -252,6 +252,8 @@ class MatrixBackend(BaseBackend):
                         password=self.config.get("password", ""),
                         recovery_key=self.config.get("recovery_key", ""),
                     )
+                    if refresh_tok:
+                        self.config["refresh_token"] = refresh_tok
                     old_device_id = self.config.get("device_id") or ""
                     if dev_id and dev_id != old_device_id:
                         logger.info("[%s] Device ID changed: %s -> %s, clearing crypto store", self.name, old_device_id, dev_id)
@@ -439,7 +441,7 @@ class MatrixBackend(BaseBackend):
             return False
         try:
             from backends.sso_login import sso_login
-            token, device_id = await sso_login(
+            token, device_id, refresh_tok = await sso_login(
                 homeserver=self.config["homeserver"],
                 element_url=element_url,
                 user_id=self.config["user_id"],
@@ -452,6 +454,8 @@ class MatrixBackend(BaseBackend):
             self._client.device_id = device_id
             self.config["access_token"] = token
             self.config["device_id"] = device_id
+            if refresh_tok:
+                self.config["refresh_token"] = refresh_tok
             await self._persist_device_id()
             logger.info("[%s] Token refreshed via SSO browser", self.name)
             return True

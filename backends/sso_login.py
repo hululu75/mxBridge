@@ -182,14 +182,14 @@ async def sso_login(
                             dev_id = confirmed
                             _save_cached_token(homeserver, token, dev_id, cached_refresh)
                         logger.info("[sso] Cached token valid for %s device=%s", body.get("user_id"), dev_id)
-                        return token, dev_id
+                        return token, dev_id, cached_refresh
                     else:
                         logger.info("[sso] Cached token invalid, trying refresh_token...")
                         refreshed = await _try_refresh_token(homeserver, cached_refresh)
                         if refreshed:
                             new_token, new_refresh, _ = refreshed
                             _save_cached_token(homeserver, new_token, dev_id, new_refresh)
-                            return new_token, dev_id
+                            return new_token, dev_id, new_refresh
                         logger.info("[sso] refresh_token also invalid, re-login required")
         except Exception as e:
             logger.info("[sso] Cache validation failed: %s, re-login required", e)
@@ -247,7 +247,7 @@ async def sso_login(
 
     _save_cached_token(homeserver, token, device, refresh_token)
     logger.info("[sso] Login successful, device_id=%s refresh_token=%s", device, "yes" if refresh_token else "no")
-    return token, device
+    return token, device, refresh_token
 
 
 async def _do_sso_flow(

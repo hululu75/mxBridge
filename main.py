@@ -174,7 +174,7 @@ async def setup_credentials(config: dict, config_path: str, master_password: str
                     "Add: element_url: \"https://your-element-url\""
                 )
             logger.info("[%s] Starting SSO login via %s ...", section_key, element_url)
-            access_token, actual_device_id = await sso_login(
+            access_token, actual_device_id, refresh_tok = await sso_login(
                 homeserver=homeserver,
                 element_url=element_url,
                 user_id=user_id,
@@ -182,6 +182,9 @@ async def setup_credentials(config: dict, config_path: str, master_password: str
                 username=section.get("sso_username", ""),
                 password=password,
             )
+            if refresh_tok:
+                runtime_config[section_key]["refresh_token"] = refresh_tok
+                save_config[section_key]["refresh_token"] = refresh_tok
         logger.info("[%s] Login successful, device_id=%s", section_key, actual_device_id)
 
         key_file = input(f"[{section_key}] Path to encryption key file (Enter to skip): ").strip()
