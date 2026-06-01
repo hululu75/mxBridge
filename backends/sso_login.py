@@ -169,7 +169,7 @@ async def sso_login(
 
         try:
             token, device = await asyncio.wait_for(
-                _do_sso_flow(page, element_url, username, password, user_id, device_id),
+                _do_sso_flow(page, element_url, username, password, user_id, device_id, homeserver),
                 timeout=180,
             )
         except Exception:
@@ -197,16 +197,18 @@ async def _do_sso_flow(
     password: str,
     user_id: str,
     device_id: str,
+    homeserver: str = "",
 ) -> tuple[Optional[str], str]:
     token = None
     device = device_id
+    hs_prefix = homeserver.rstrip("/") if homeserver else ""
 
     async def on_request(request):
         nonlocal token
         if token:
             return
         url = request.url
-        if "/_matrix/" in url or "synapse" in url or "collab.lusis" in url:
+        if "/_matrix/" in url or (hs_prefix and url.startswith(hs_prefix)):
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer ") and len(auth) > 20:
                 candidate = auth[7:].strip()
@@ -244,12 +246,16 @@ async def _do_sso_flow(
     await page.goto(login_url, wait_until="networkidle")
     await asyncio.sleep(3)
 
+    element_host = element_url.rstrip("/").split("//")[-1].split("/")[0] if element_url else ""
+
     for _round in range(15):
         current_url = page.url
         logger.info("[sso] round %d URL: %s", _round, current_url)
 
-        if "keycloak" in current_url.lower() or "auth" in current_url.lower():
-            await _fill_keycloak_form(page, username, password)
+        if "keycloak" in current_url.lower() or (
+            "auth" in current_url.lower() and element_host and element_host not in current_url
+        ):
+            await _fill_keycloak_form(page, username, password, element_url)
             break
 
         if "totp" in current_url.lower() or "otp" in current_url.lower():
@@ -257,6 +263,7 @@ async def _do_sso_flow(
             await _submit_totp(page, totp_code)
             break
 
+        clicked = False
         for sel in _NEXT_SELECTORS:
             try:
                 btn = page.locator(sel).first
@@ -264,36 +271,41 @@ async def _do_sso_flow(
                     await btn.click()
                     logger.info("[sso] Clicked: %s", sel)
                     await asyncio.sleep(2)
+                    clicked = True
                     break
             except Exception:
                 continue
 
-        for sel in _SSO_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info("[sso] Clicked: %s", sel)
-                    await asyncio.sleep(3)
-                    break
-            except Exception:
-                continue
+        if not clicked:
+            for sel in _SSO_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click()
+                        logger.info("[sso] Clicked: %s", sel)
+                        await asyncio.sleep(3)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
 
-        for sel in _SUBMIT_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info("[sso] Clicked: %s", sel)
-                    await asyncio.sleep(3)
-                    break
-            except Exception:
-                continue
+        if not clicked:
+            for sel in _SUBMIT_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click()
+                        logger.info("[sso] Clicked: %s", sel)
+                        await asyncio.sleep(3)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
 
         await asyncio.sleep(2)
 
     if not token:
-        await _handle_post_login_page(page)
+        await _handle_post_login_page(page, element_url)
 
     done_selectors = ["button:has-text('Done')", "a:has-text('Done')"]
     for sel in done_selectors:
@@ -362,10 +374,10 @@ async def _do_sso_flow(
         except Exception as e:
             logger.debug("[sso] Cookie dump failed: %s", e)
 
-    if not token:
+    if not token and hs_prefix:
         try:
             whoami_resp = await page.request.get(
-                "https://cloud.collab.lusis.net/_matrix/client/v3/account/whoami"
+                f"{hs_prefix}/_matrix/client/v3/account/whoami"
             )
             whoami_text = await whoami_resp.text()
             logger.info("[sso] whoami status=%s body=%s", whoami_resp.status, whoami_text[:300])
@@ -433,9 +445,10 @@ async def _do_sso_flow(
     return token, device
 
 
-async def _handle_post_login_page(page) -> None:
+async def _handle_post_login_page(page, element_url: str = "") -> None:
     current_url = page.url
     logger.info("[sso] Post-login URL: %s", current_url)
+    element_host = element_url.rstrip("/").split("//")[-1].split("/")[0] if element_url else ""
 
     for i in range(15):
         await asyncio.sleep(2)
@@ -445,12 +458,14 @@ async def _handle_post_login_page(page) -> None:
         if "consent" in new_url.lower():
             await _handle_consent_page(page)
             continue
-        if "web.collab" in new_url or "element" in new_url:
+        if element_host and element_host in new_url:
             logger.info("[sso] Redirected back to Element")
             await asyncio.sleep(5)
             break
-        if "login.collab" in new_url:
-            logger.info("[sso] At callback proxy, waiting...")
+        if "/#/" in new_url or "/#/login" in new_url or "/#/home" in new_url:
+            logger.info("[sso] Redirected back to Element (hash route)")
+            await asyncio.sleep(5)
+            break
 
     await page.wait_for_load_state("domcontentloaded")
     await _debug_screenshot(page)
@@ -588,8 +603,9 @@ async def _click_submit(page) -> bool:
     return False
 
 
-async def _fill_keycloak_form(page, username: str, password: str) -> None:
+async def _fill_keycloak_form(page, username: str, password: str, element_url: str = "") -> None:
     logger.info("[sso] Filling Keycloak login form...")
+    element_host = element_url.rstrip("/").split("//")[-1].split("/")[0] if element_url else ""
 
     await _fill_field(page, "username", username)
     await _fill_field(page, "password", password)
@@ -605,10 +621,18 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
         logger.error("[sso] Login may have failed, checking page...")
         await _debug_screenshot(page)
 
-    if "totp" in current_url.lower() or "otp" in current_url.lower():
-        totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
-        await _submit_totp(page, totp_code)
-    else:
+    totp_needed = "totp" in current_url.lower() or "otp" in current_url.lower()
+    if not totp_needed:
+        for sel in _INPUT_SELECTORS["otp"]:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=500):
+                    totp_needed = True
+                    break
+            except Exception:
+                continue
+
+    if totp_needed:
         totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
         if totp_code:
             filled = await _fill_field(page, "otp", totp_code)
@@ -619,8 +643,10 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
                 await page.wait_for_load_state("domcontentloaded")
                 logger.info("[sso] Current URL after TOTP: %s", page.url)
             else:
-                logger.warning("[sso] No OTP field found, current URL: %s", page.url)
+                logger.warning("[sso] No OTP field found despite detection, current URL: %s", page.url)
                 await _debug_screenshot(page)
+    else:
+        logger.info("[sso] No TOTP required, continuing...")
 
     logger.info("[sso] Waiting for final redirect...")
     for i in range(15):
@@ -630,12 +656,14 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
         if "consent" in new_url.lower():
             await _handle_consent_page(page)
             continue
-        if "web.collab" in new_url or "element" in new_url:
+        if element_host and element_host in new_url:
             logger.info("[sso] Redirected back to Element")
             await asyncio.sleep(5)
             break
-        if "login.collab" in new_url:
-            logger.info("[sso] At callback proxy, waiting...")
+        if "/#/" in new_url:
+            logger.info("[sso] Redirected back to Element (hash route)")
+            await asyncio.sleep(5)
+            break
     await page.wait_for_load_state("domcontentloaded")
     await _debug_screenshot(page)
 
