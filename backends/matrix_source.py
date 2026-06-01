@@ -279,7 +279,8 @@ class MatrixSourceBackend(MatrixBackend):
         for receipt in event.receipts:
             if receipt.user_id == own_user_id:
                 continue
-            if receipt.receipt_type.value != "m.read":
+            rt = receipt.receipt_type.value if hasattr(receipt.receipt_type, "value") else receipt.receipt_type
+            if rt != "m.read":
                 continue
             await self._emit_read_receipt(receipt.event_id, room.room_id)
 
