@@ -99,6 +99,7 @@ class MatrixSourceBackend(MatrixBackend):
         self._flush_task = asyncio.create_task(self._periodic_flush())
         self._key_upload_task = asyncio.create_task(self._periodic_key_upload())
         self._call_cleanup_task = asyncio.create_task(self._cleanup_stale_calls())
+        self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
         self._sync_task = asyncio.create_task(self._sync_loop())
         logger.log(ALWAYS, "[%s] Started, beginning sync loop", self.name)
 

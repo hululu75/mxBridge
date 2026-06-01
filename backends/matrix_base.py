@@ -68,6 +68,8 @@ class MatrixBackend(BaseBackend):
         self._sync_task: Optional[asyncio.Task] = None
         self._key_upload_task: Optional[asyncio.Task] = None
         self._call_cleanup_task: Optional[asyncio.Task] = None
+        self._token_refresh_task: Optional[asyncio.Task] = None
+        self._token_obtained_at: float = 0.0
         self._pending_encrypted: dict[str, dict] = {}
         self._pending_event_ids: set[str] = set()
         self._config_path = config_path
@@ -237,6 +239,7 @@ class MatrixBackend(BaseBackend):
                     access_token=access_token,
                 )
                 logger.log(ALWAYS, "[%s] Restored login with access_token (device=%s)", self.name, device_id_val)
+                self._token_obtained_at = time.monotonic()
         if not access_token:
             element_url = self.config.get("element_url", "")
             if element_url:
@@ -277,6 +280,7 @@ class MatrixBackend(BaseBackend):
                     )
                     self.config["access_token"] = token
                     self.config["device_id"] = dev_id
+                    self._token_obtained_at = time.monotonic()
                     await self._persist_device_id()
                 except Exception as e:
                     raise RuntimeError(f"SSO login failed for {self.name}: {e}")
@@ -430,6 +434,7 @@ class MatrixBackend(BaseBackend):
                 self._client.access_token = new_token
                 self.config["access_token"] = new_token
                 self.config["refresh_token"] = new_refresh
+                self._token_obtained_at = time.monotonic()
                 await self._persist_device_id()
                 logger.info("[%s] Token silently refreshed via refresh_token", self.name)
                 return True
@@ -456,6 +461,7 @@ class MatrixBackend(BaseBackend):
             self.config["device_id"] = device_id
             if refresh_tok:
                 self.config["refresh_token"] = refresh_tok
+            self._token_obtained_at = time.monotonic()
             await self._persist_device_id()
             logger.info("[%s] Token refreshed via SSO browser", self.name)
             return True
@@ -465,9 +471,23 @@ class MatrixBackend(BaseBackend):
 
     # ---------------------------------------------------------------- lifecycle
 
+    async def _periodic_token_refresh(self) -> None:
+        """Proactively refresh the token before it expires."""
+        REFRESH_INTERVAL = 240  # refresh every 4 minutes (before 5-minute expiry)
+        await asyncio.sleep(REFRESH_INTERVAL)
+        while self._running:
+            age = time.monotonic() - self._token_obtained_at
+            if age >= REFRESH_INTERVAL:
+                logger.info("[%s] Proactive token refresh (age=%.0fs)", self.name, age)
+                try:
+                    await self._refresh_token_via_sso()
+                except Exception as e:
+                    logger.error("[%s] Proactive token refresh failed: %s", self.name, e)
+            await asyncio.sleep(60)
+
     async def stop(self) -> None:
         self._running = False
-        for attr in ("_flush_task", "_key_upload_task", "_sync_task", "_call_cleanup_task"):
+        for attr in ("_flush_task", "_key_upload_task", "_sync_task", "_call_cleanup_task", "_token_refresh_task"):
             task = getattr(self, attr, None)
             if task:
                 task.cancel()

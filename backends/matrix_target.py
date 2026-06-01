@@ -55,6 +55,7 @@ class MatrixTargetBackend(MatrixBackend):
         self._running = True
         self._flush_task = asyncio.create_task(self._periodic_flush())
         self._key_upload_task = asyncio.create_task(self._periodic_key_upload())
+        self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
 
         logger.info("[%s] Performing initial sync to load rooms", self.name)
         resp = await client.sync(timeout=0, full_state=True)

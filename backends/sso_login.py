@@ -126,12 +126,53 @@ def _save_cached_token(homeserver: str, access_token: str, device_id: str, refre
 async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tuple[str, str, str]]:
     """Use refresh_token to silently get a new access_token.
 
+    Supports both Matrix refresh tokens and OIDC refresh tokens (stored as JSON).
     Returns (access_token, refresh_token, device_id) or None on failure.
     """
     if not refresh_token:
         return None
+
+    import aiohttp
+
+    # OIDC refresh token (stored as JSON with endpoint + client_id)
+    if refresh_token.startswith("{"):
+        try:
+            meta = json.loads(refresh_token)
+            rt = meta.get("refresh_token", "")
+            endpoint = meta.get("token_endpoint", "")
+            client_id = meta.get("client_id", "")
+            if rt and endpoint:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        endpoint,
+                        data={
+                            "grant_type": "refresh_token",
+                            "refresh_token": rt,
+                            "client_id": client_id,
+                        },
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    ) as resp:
+                        if resp.status == 200:
+                            body = await resp.json()
+                            new_access = body.get("access_token", "")
+                            new_rt = body.get("refresh_token", rt)
+                            if new_access:
+                                logger.info("[sso] Token silently refreshed via OIDC refresh_token")
+                                new_meta = json.dumps({
+                                    "refresh_token": new_rt,
+                                    "token_endpoint": endpoint,
+                                    "client_id": client_id,
+                                })
+                                return new_access, new_meta, ""
+                        else:
+                            text = await resp.text()
+                            logger.info("[sso] OIDC refresh rejected (HTTP %d): %s", resp.status, text[:100])
+        except Exception as e:
+            logger.debug("[sso] OIDC refresh attempt failed: %s", e)
+        return None
+
+    # Matrix refresh token
     try:
-        import aiohttp
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{homeserver.rstrip('/')}/_matrix/client/v3/auth/refresh",
@@ -142,13 +183,13 @@ async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tu
                     new_access = body.get("access_token", "")
                     new_refresh = body.get("refresh_token", refresh_token)
                     if new_access:
-                        logger.info("[sso] Token silently refreshed via refresh_token")
+                        logger.info("[sso] Token silently refreshed via Matrix refresh_token")
                         return new_access, new_refresh, ""
                 else:
                     text = await resp.text()
-                    logger.info("[sso] Refresh token rejected (HTTP %d): %s", resp.status, text[:100])
+                    logger.info("[sso] Matrix refresh rejected (HTTP %d): %s", resp.status, text[:100])
     except Exception as e:
-        logger.debug("[sso] refresh_token attempt failed: %s", e)
+        logger.debug("[sso] Matrix refresh_token attempt failed: %s", e)
     return None
 
 
@@ -511,6 +552,44 @@ async def _do_sso_flow(
             device = await page.evaluate("() => localStorage.getItem('mx_device_id') || ''")
         except Exception:
             pass
+
+    # Extract OIDC session from Element's localStorage (oidc.user:{issuer}:{client_id})
+    if not refresh_token:
+        try:
+            oidc_json = await page.evaluate("""() => {
+                const keys = Object.keys(localStorage).filter(k => k.startsWith('oidc.user:'));
+                for (const key of keys) {
+                    try {
+                        const data = JSON.parse(localStorage.getItem(key));
+                        if (data && data.refresh_token) {
+                            const parts = key.split(':');
+                            return JSON.stringify({
+                                refresh_token: data.refresh_token,
+                                token_endpoint: (data.profile && data.profile.token_endpoint) || null,
+                                client_id: parts.length >= 3 ? parts[parts.length - 1] : null,
+                                expires_at: data.expires_at || null,
+                            });
+                        }
+                    } catch(e) {}
+                }
+                return null;
+            }""")
+            if oidc_json:
+                import json as _json
+                oidc_data = _json.loads(oidc_json)
+                refresh_token = oidc_data.get("refresh_token", "")
+                if refresh_token:
+                    logger.info("[sso] Captured OIDC refresh_token from localStorage (endpoint=%s)",
+                                oidc_data.get("token_endpoint", "unknown"))
+                    # Stash endpoint and client_id alongside the refresh_token
+                    if oidc_data.get("token_endpoint"):
+                        refresh_token = _json.dumps({
+                            "refresh_token": refresh_token,
+                            "token_endpoint": oidc_data["token_endpoint"],
+                            "client_id": oidc_data.get("client_id", ""),
+                        })
+        except Exception as e:
+            logger.debug("[sso] OIDC localStorage extraction failed: %s", e)
 
     return token, device, refresh_token
 
