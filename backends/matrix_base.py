@@ -427,7 +427,8 @@ class MatrixBackend(BaseBackend):
     async def _refresh_token_via_sso(self) -> bool:
         # Try silent refresh_token first — avoids launching a browser.
         refresh_token = self.config.get("refresh_token", "")
-        if refresh_token and not self._matrix_refresh_unsupported:
+        is_oidc = refresh_token.startswith("{") if refresh_token else False
+        if refresh_token and (is_oidc or not self._matrix_refresh_unsupported):
             from backends.sso_login import _try_refresh_token, _save_cached_token
             result = await _try_refresh_token(self.config["homeserver"], refresh_token)
             if result and result[0] == "unsupported":

@@ -141,15 +141,21 @@ async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tu
             rt = meta.get("refresh_token", "")
             endpoint = meta.get("token_endpoint", "")
             client_id = meta.get("client_id", "")
-            if rt and endpoint:
+            if not rt or not endpoint:
+                return None
+            logger.info("[sso] Trying OIDC refresh: endpoint=%s client_id=%r", endpoint, client_id)
+            # Try with client_id first, then without (MAS/some providers don't need it)
+            for payload in [
+                {"grant_type": "refresh_token", "refresh_token": rt, "client_id": client_id},
+                {"grant_type": "refresh_token", "refresh_token": rt},
+            ]:
+                if not payload.get("client_id") and payload is not []:
+                    # skip empty client_id variant if first attempt with client_id also had none
+                    pass
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
                         endpoint,
-                        data={
-                            "grant_type": "refresh_token",
-                            "refresh_token": rt,
-                            "client_id": client_id,
-                        },
+                        data=payload,
                         headers={"Content-Type": "application/x-www-form-urlencoded"},
                     ) as resp:
                         if resp.status == 200:
@@ -157,7 +163,7 @@ async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tu
                             new_access = body.get("access_token", "")
                             new_rt = body.get("refresh_token", rt)
                             if new_access:
-                                logger.info("[sso] Token silently refreshed via OIDC refresh_token")
+                                logger.info("[sso] Token silently refreshed via OIDC (client_id=%r)", payload.get("client_id"))
                                 new_meta = json.dumps({
                                     "refresh_token": new_rt,
                                     "token_endpoint": endpoint,
@@ -166,7 +172,10 @@ async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tu
                                 return new_access, new_meta, ""
                         else:
                             text = await resp.text()
-                            logger.info("[sso] OIDC refresh rejected (HTTP %d): %s", resp.status, text[:100])
+                            logger.info("[sso] OIDC refresh rejected (HTTP %d) payload=%s: %s",
+                                        resp.status, list(payload.keys()), text[:150])
+                            if resp.status not in (400, 401):
+                                break  # non-auth error, don't retry
         except Exception as e:
             logger.debug("[sso] OIDC refresh attempt failed: %s", e)
         return None
@@ -722,15 +731,12 @@ async def _handle_post_login_page(page, element_url: str = "", recovery_key: str
 
 async def _debug_screenshot(page) -> None:
     try:
-        path = os.path.join(os.getcwd(), "sso_debug.png")
-        await page.screenshot(path=path, full_page=True)
-        logger.info("[sso] Screenshot saved to %s (URL: %s)", path, page.url)
         title = await page.title()
         body_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
-        logger.info("[sso] Page title: %s", title)
-        logger.info("[sso] Body text: %.200s", body_text)
+        logger.debug("[sso] Page title: %s | URL: %s", title, page.url)
+        logger.debug("[sso] Body text: %.200s", body_text)
     except Exception as e:
-        logger.warning("[sso] Debug screenshot failed: %s", e)
+        logger.debug("[sso] Debug page info failed: %s", e)
 
 
 async def _handle_consent_page(page) -> bool:
