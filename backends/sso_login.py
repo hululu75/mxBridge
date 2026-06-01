@@ -204,35 +204,70 @@ async def _do_sso_flow(
 
     if not token:
         try:
-            result = await page.evaluate("""async () => {
+            result = await page.evaluate("""() => {
                 try {
-                    const idb = await new Promise((resolve, reject) => {
-                        const req = indexedDB.open('matrix-react-sdk_session');
-                        req.onupgradeneeded = (e) => {
-                            const db = e.target.result;
-                            if (!db.objectStoreNames.contains('session')) {
-                                db.createObjectStore('session');
-                            }
-                        };
-                        req.onsuccess = () => resolve(req.result);
-                        req.onerror = () => reject(req.error);
-                    });
-                    if (!idb.objectStoreNames.contains('session')) return null;
-                    const tx = idb.transaction('session', 'readonly');
-                    const store = tx.objectStore('session');
-                    return new Promise((resolve) => {
-                        const req = store.get('sessionId');
-                        req.onsuccess = () => {
-                            const val = req.result;
-                            if (val && val.session) resolve(val.session.accessToken || val.session.access_token);
-                            else resolve(null);
-                        };
-                        req.onerror = () => resolve(null);
-                    });
-                } catch(e) { return null; }
+                    const keys = Object.keys(localStorage);
+                    for (const k of keys) {
+                        try {
+                            const v = JSON.parse(localStorage.getItem(k));
+                            if (v && v.accessToken) return v.accessToken;
+                            if (v && v.access_token) return v.access_token;
+                        } catch(e) {}
+                    }
+                } catch(e) {}
+                try {
+                    const mx = window.matrixClient;
+                    if (mx && mx.getAccessToken) return mx.getAccessToken();
+                    if (mx && mx._http && mx._http.opts) return mx._http.opts.accessToken;
+                } catch(e) {}
+                return null;
             }""")
             if result:
                 token = result
+                logger.info("[sso] Got token from window.matrixClient")
+        except Exception:
+            pass
+
+    if not token:
+        try:
+            result = await page.evaluate("""async () => {
+                try {
+                    const dbs = await indexedDB.databases();
+                    for (const dbInfo of dbs) {
+                        try {
+                            const idb = await new Promise((resolve, reject) => {
+                                const req = indexedDB.open(dbInfo.name);
+                                req.onsuccess = () => resolve(req.result);
+                                req.onerror = () => resolve(null);
+                            });
+                            if (!idb) continue;
+                            for (const name of idb.objectStoreNames) {
+                                try {
+                                    const tx = idb.transaction(name, 'readonly');
+                                    const store = tx.objectStore(name);
+                                    const items = await new Promise((resolve) => {
+                                        const req = store.getAll();
+                                        req.onsuccess = () => resolve(req.result);
+                                        req.onerror = () => resolve([]);
+                                    });
+                                    for (const item of items) {
+                                        const obj = item.value || item.session || item;
+                                        if (typeof obj === 'object' && obj) {
+                                            if (obj.accessToken) return obj.accessToken;
+                                            if (obj.access_token) return obj.access_token;
+                                            if (obj.token) return obj.token;
+                                        }
+                                    }
+                                } catch(e) {}
+                            }
+                        } catch(e) {}
+                    }
+                } catch(e) {}
+                return null;
+            }""")
+            if result:
+                token = result
+                logger.info("[sso] Got token from IndexedDB")
         except Exception:
             pass
 
