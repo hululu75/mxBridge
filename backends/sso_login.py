@@ -294,6 +294,42 @@ async def _debug_screenshot(page) -> None:
         logger.warning("[sso] Debug screenshot failed: %s", e)
 
 
+_CONSENT_SELECTORS = [
+    "button[type='submit']",
+    "button:has-text('Allow')",
+    "button:has-text('Accept')",
+    "button:has-text('Grant')",
+    "button:has-text('Consent')",
+    "button:has-text('Approve')",
+    "button:has-text('Authorize')",
+    "input[type='submit']",
+    "button:has-text('Continue')",
+    "button:has-text('Yes')",
+]
+
+
+async def _handle_consent_page(page) -> bool:
+    current_url = page.url
+    if "consent" not in current_url.lower():
+        return False
+    logger.info("[sso] Found consent page, clicking approve...")
+    for sel in _CONSENT_SELECTORS:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=1000):
+                await btn.click()
+                logger.info("[sso] Clicked consent button: %s", sel)
+                await asyncio.sleep(5)
+                await page.wait_for_load_state("networkidle")
+                logger.info("[sso] URL after consent: %s", page.url)
+                return True
+        except Exception:
+            continue
+    await _debug_screenshot(page)
+    logger.warning("[sso] Could not find consent button")
+    return False
+
+
 async def _fill_field(page, field_type: str, value: str) -> bool:
     for sel in _INPUT_SELECTORS.get(field_type, []):
         try:
@@ -353,10 +389,13 @@ async def _fill_keycloak_form(page, username: str, password: str) -> None:
                 await _debug_screenshot(page)
 
     logger.info("[sso] Waiting for final redirect...")
-    for i in range(10):
-        await asyncio.sleep(3)
+    for i in range(15):
+        await asyncio.sleep(2)
         new_url = page.url
         logger.info("[sso] post-login URL check %d: %s", i, new_url)
+        if "consent" in new_url.lower():
+            await _handle_consent_page(page)
+            continue
         if "web.collab" in new_url or "element" in new_url:
             logger.info("[sso] Redirected back to Element")
             await asyncio.sleep(5)
