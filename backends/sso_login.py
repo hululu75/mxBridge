@@ -335,7 +335,7 @@ async def _do_sso_flow(
             }""")
             if result:
                 logger.info("[sso] Got token from IndexedDB (len=%d)", len(result))
-                return result, device
+                token = result
             else:
                 logger.info("[sso] No token found in IndexedDB")
         except Exception as e:
@@ -356,7 +356,7 @@ async def _do_sso_flow(
             }""")
             if result:
                 logger.info("[sso] Got token from matrixClient")
-                return result, device
+                token = result
         except Exception:
             pass
 
@@ -387,7 +387,13 @@ async def _do_sso_flow(
             }""")
             if result:
                 logger.info("[sso] Got token from intercepting fetch")
-                return result, device
+                token = result
+        except Exception:
+            pass
+
+    if not device:
+        try:
+            device = await page.evaluate("() => localStorage.getItem('mx_device_id') || ''")
         except Exception:
             pass
 
