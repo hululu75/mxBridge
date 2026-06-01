@@ -362,48 +362,103 @@ async def _do_sso_flow(
 
     if not token:
         try:
+            cookies = await page.context.cookies()
+            logger.info("[sso] Cookies: %s", [(c['name'], c['value'][:30]) for c in cookies])
+        except Exception as e:
+            logger.debug("[sso] Cookie dump failed: %s", e)
+
+    if not token:
+        try:
+            whoami = await page.request.get(
+                "https://cloud.collab.lusis.net/_matrix/client/v3/account/whoami"
+            )
+            whoami_text = await whoami.text()
+            logger.info("[sso] whoami status=%s body=%s", whoami.status, whoami_text[:200])
+            if whoami.status == 200:
+                whoami_data = json.loads(whoami_text)
+                device = whoami_data.get("device_id", device)
+        except Exception as e:
+            logger.debug("[sso] whoami via page.request failed: %s", e)
+
+    if not token:
+        try:
             result = await page.evaluate("""async () => {
-                return new Promise((resolve) => {
-                    let resolved = false;
-                    const origFetch = window.fetch;
-                    window.fetch = function(...args) {
-                        const opts = args[1] || {};
-                        const headers = opts.headers || {};
-                        const auth = headers.Authorization || headers.authorization || '';
-                        if (auth && auth.startsWith('Bearer ')) {
-                            if (!resolved) {
-                                resolved = true;
-                                setTimeout(() => { window.fetch = origFetch; }, 100);
-                                return origFetch.apply(this, args).then(r => {
-                                    resolve(auth.replace('Bearer ', ''));
-                                    return r;
-                                });
-                            }
-                        }
-                        // Also check for cookie-based session auth
-                        const cookie = document.cookie || '';
-                        if (cookie.includes('sid=') || cookie.includes('session') || cookie.includes('oauth')) {
-                            if (!resolved) {
-                                resolved = true;
-                                setTimeout(() => { window.fetch = origFetch; resolve(null); }, 100);
-                            }
-                        }
-                        return origFetch.apply(this, args);
-                    };
-                    // Trigger a whoami call
-                    const baseUrl = localStorage.getItem('mx_hs_url') || '';
-                    origFetch(baseUrl + '/_matrix/client/v3/account/whoami', {
-                        credentials: 'include',
-                        headers: {}
-                    }).catch(() => {});
-                    setTimeout(() => { window.fetch = origFetch; resolve(null); }, 8000);
+                // MAS stores tokens in IndexedDB under the client_id key
+                const clientId = localStorage.getItem('mx_oidc_client_id');
+                const dbName = 'matrix-react-sdk';
+                const idb = await new Promise((resolve, reject) => {
+                    const req = indexedDB.open(dbName);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => resolve(null);
                 });
+                if (!idb) return null;
+                
+                // List all store names and scan them
+                const storeNames = Array.from(idb.objectStoreNames);
+                const results = {};
+                for (const storeName of storeNames) {
+                    try {
+                        const tx = idb.transaction(storeName, 'readonly');
+                        const store = tx.objectStore(storeName);
+                        const allKeys = await new Promise((resolve) => {
+                            const req = store.getAllKeys();
+                            req.onsuccess = () => resolve(req.result);
+                            req.onerror = () => resolve([]);
+                        });
+                        results[storeName] = allKeys;
+                        for (const key of allKeys) {
+                            const val = await new Promise((resolve) => {
+                                const req = store.get(key);
+                                req.onsuccess = () => resolve(req.result);
+                                req.onerror = () => resolve(null);
+                            });
+                            if (val && typeof val === 'object') {
+                                if (val.access_token) return val.access_token;
+                                if (val.accessToken) return val.accessToken;
+                                if (val.token) return val.token;
+                            }
+                        }
+                    } catch(e) {}
+                }
+                return JSON.stringify({stores: results, clientId});
+            }""")
+            if result and not result.startswith('{'):
+                logger.info("[sso] Got access token from matrix-react-sdk IDB")
+                token = result
+            else:
+                logger.info("[sso] IDB store scan result: %s", (result or "null")[:300])
+        except Exception as e:
+            logger.debug("[sso] IDB detailed scan failed: %s", e)
+
+    if not token:
+        try:
+            result = await page.evaluate("""() => {
+                const mx = window.mxMatrixClientPeg || window.mx_matrixClientPeg;
+                if (mx) {
+                    const mc = mx.get();
+                    if (mc && mc._http && mc._http.opts) return mc._http.opts.accessToken;
+                }
+                // Also try window.mxMatrixClientPeg directly
+                for (const key of Object.getOwnPropertyNames(window)) {
+                    if (key.includes('matrix') || key.includes('Matrix')) {
+                        try {
+                            const obj = window[key];
+                            if (obj && obj.get) {
+                                const mc = obj.get();
+                                if (mc && mc._http && mc._http.opts && mc._http.opts.accessToken) {
+                                    return mc._http.opts.accessToken;
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                }
+                return null;
             }""")
             if result:
-                logger.info("[sso] Got token from intercepting fetch (len=%s)", len(result) if result else 0)
+                logger.info("[sso] Got token from window matrixClient")
                 token = result
         except Exception as e:
-            logger.debug("[sso] Fetch intercept failed: %s", e)
+            logger.debug("[sso] window scan failed: %s", e)
 
     if not device:
         try:
