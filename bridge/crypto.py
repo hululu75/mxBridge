@@ -74,7 +74,7 @@ def derive_db_key(master_password: str, salt: bytes) -> str:
 
 
 def decrypt_config(config: dict, master_password: str) -> dict:
-    encrypted_fields = ("access_token", "password", "key_import_passphrase")
+    encrypted_fields = ("access_token", "password", "key_import_passphrase", "recovery_key")
 
     for section_key in ("source", "target"):
         section = config.get(section_key)

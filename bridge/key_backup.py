@@ -49,8 +49,13 @@ def _decode_recovery_key(key_str: str) -> bytes:
     """Decode Matrix recovery key → 32-byte SSSS master key.
 
     Format: base58(0x8B 0x01 <32 bytes> <1-byte parity>)
+    Accepts keys formatted with spaces, dashes, or colons as separators.
     """
-    clean = key_str.strip().replace(" ", "").replace("-", "")
+    # Strip all common separator characters used by different Matrix clients
+    clean = key_str.strip()
+    for sep in (" ", "-", ":"):
+        clean = clean.replace(sep, "")
+    logger.debug("[key_backup] Recovery key clean length=%d first4=%r", len(clean), clean[:4])
     raw = _base58_decode(clean)
     if len(raw) != 35:
         raise ValueError(f"Recovery key wrong decoded length: {len(raw)} (expected 35)")

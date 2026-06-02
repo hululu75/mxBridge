@@ -227,7 +227,7 @@ def _config_needs_key(config: dict) -> bool:
         section = config.get(section_key)
         if not isinstance(section, dict):
             continue
-        for field in ("access_token", "password", "key_import_passphrase"):
+        for field in ("access_token", "password", "key_import_passphrase", "recovery_key"):
             value = section.get(field, "")
             if is_encrypted(value):
                 return True
@@ -250,7 +250,7 @@ def _check_config_writable(config_path: str) -> None:
 
 
 def _has_plaintext_credentials(config: dict) -> bool:
-    sensitive_fields = ("access_token", "password", "key_import_passphrase")
+    sensitive_fields = ("access_token", "password", "key_import_passphrase", "recovery_key")
     for section_key in ("source", "target"):
         section = config.get(section_key)
         if not isinstance(section, dict):
@@ -268,7 +268,7 @@ def _has_plaintext_credentials(config: dict) -> bool:
 def _auto_encrypt_plaintext_fields(
     config: dict, master_key: str, config_path: str,
 ) -> dict:
-    sensitive_fields = ("access_token", "password", "key_import_passphrase")
+    sensitive_fields = ("access_token", "password", "key_import_passphrase", "recovery_key")
     changed = False
     save_config = copy.deepcopy(config)
 
