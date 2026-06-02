@@ -684,18 +684,9 @@ class MatrixBackend(BaseBackend):
         client = self._get_client()
         backoff = 0
         _last_key_upload = 0.0
-        _sync_count = 0
-        _sync_window_start = time.monotonic()
         while self._running:
             try:
                 resp = await client.sync(timeout=SYNC_TIMEOUT)
-                _sync_count += 1
-                _elapsed = time.monotonic() - _sync_window_start
-                if _elapsed >= 10.0:
-                    logger.info("[%s] Sync rate: %.1f/s over last %.0fs",
-                                self.name, _sync_count / _elapsed, _elapsed)
-                    _sync_count = 0
-                    _sync_window_start = time.monotonic()
                 if isinstance(resp, SyncResponse):
                     backoff = 0
                     if resp.next_batch:
