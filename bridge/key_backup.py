@@ -138,10 +138,18 @@ def _verify_ssss_key(ssss_key: bytes, key_metadata: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _decrypt_backup_session(priv_bytes: bytes, session_data: dict) -> Optional[dict]:
-    """Decrypt one backup session using the backup Curve25519 private key."""
+    """Decrypt one backup session using the backup Curve25519 private key.
+
+    Uses libolm PkDecryption algorithm:
+      - ECDH → 32-byte shared secret
+      - HKDF-SHA256(shared, info="MATRIX_BACKUP_DECRYPTION_KEY", length=80)
+          aes_key = [0:32], mac_key = [32:64], iv = [64:80]
+      - Verify: HMAC-SHA256(mac_key, ciphertext)[:8] == mac
+      - Decrypt: AES-256-CBC(aes_key, iv, ciphertext) with PKCS7 unpad
+    """
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives import hashes, padding as crypto_padding
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     try:
         ephemeral = base64.b64decode(session_data["ephemeral"])
@@ -151,20 +159,25 @@ def _decrypt_backup_session(priv_bytes: bytes, session_data: dict) -> Optional[d
         shared = X25519PrivateKey.from_private_bytes(priv_bytes).exchange(
             X25519PublicKey.from_public_bytes(ephemeral)
         )
+        # 80 bytes: 32 AES key + 32 MAC key + 16 IV
         keys = HKDF(
-            algorithm=hashes.SHA256(), length=64,
-            salt=bytes(32), info=b"MATRIX_BACKUP_DECRYPTION_KEY"
+            algorithm=hashes.SHA256(), length=80,
+            salt=None, info=b"MATRIX_BACKUP_DECRYPTION_KEY"
         ).derive(shared)
-        aes_key, mac_key = keys[:32], keys[32:]
+        aes_key, mac_key, iv = keys[:32], keys[32:64], keys[64:80]
 
-        # Per Matrix spec: only first 8 bytes of HMAC-SHA256 are stored
+        # MAC = first 8 bytes of HMAC-SHA256
         expected_mac = _hmac.new(mac_key, ct, hashlib.sha256).digest()[:8]
         if mac != expected_mac:
             return None
 
-        cipher = Cipher(algorithms.AES(aes_key), modes.CTR(bytes(16)))  # IV = all zeros
+        # AES-256-CBC with PKCS7 unpadding
+        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
         d = cipher.decryptor()
-        return json.loads(d.update(ct) + d.finalize())
+        padded = d.update(ct) + d.finalize()
+        unpadder = crypto_padding.PKCS7(128).unpadder()
+        plaintext = unpadder.update(padded) + unpadder.finalize()
+        return json.loads(plaintext)
     except Exception:
         return None
 
