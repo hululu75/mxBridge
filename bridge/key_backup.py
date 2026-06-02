@@ -192,7 +192,7 @@ def _create_key_export_data(sessions: list, passphrase: str) -> str:
     enc = Cipher(algorithms.AES(aes_key), modes.CTR(iv)).encryptor()
     ct = enc.update(plaintext) + enc.finalize()
 
-    header = bytes([0x01]) + salt + struct.pack(">I", iterations) + iv
+    header = bytes([0x01]) + salt + iv + struct.pack(">I", iterations)
     mac = _hmac.new(hmac_key, header + ct, hashlib.sha256).digest()
     data = base64.b64encode(header + ct + mac).decode()
     lines = "\n".join(data[i:i + 76] for i in range(0, len(data), 76))
