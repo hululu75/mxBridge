@@ -248,6 +248,9 @@ async def restore_key_backup(
 
         # ── Step 3: derive SSSS master key ──────────────────────────────────
         passphrase_info = key_metadata.get("passphrase")
+        logger.info("[key_backup] key_metadata algorithm=%s has_passphrase=%s has_iv=%s has_mac=%s",
+                    key_metadata.get("algorithm"), bool(passphrase_info),
+                    bool(key_metadata.get("iv")), bool(key_metadata.get("mac")))
         try:
             if passphrase_info:
                 algo = passphrase_info.get("algorithm", "")
