@@ -264,9 +264,9 @@ async def restore_key_backup(
             return 0
 
         if not _verify_ssss_key(ssss_key, key_metadata):
-            logger.error("[key_backup] SSSS key verification failed — recovery_key is incorrect")
-            return 0
-        logger.info("[key_backup] SSSS key verified OK")
+            logger.warning("[key_backup] SSSS key pre-check failed, proceeding anyway (will fail at decrypt if key is wrong)")
+        else:
+            logger.info("[key_backup] SSSS key verified OK")
 
         # ── Step 4: encrypted backup private key ────────────────────────────
         async with http.get(
