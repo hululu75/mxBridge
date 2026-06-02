@@ -95,7 +95,10 @@ class MatrixSourceBackend(MatrixBackend):
                 self.name, len(failed_sessions),
             )
 
-        # Restore megolm sessions from server key backup (needed for backfill decryption)
+        # Import keys from Element export file if configured
+        if self.config.get("key_import_file"):
+            await self.import_key_file()
+        # Restore megolm sessions from server key backup
         if self.config.get("recovery_key"):
             await self.restore_key_backup()
 

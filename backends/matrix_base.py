@@ -424,6 +424,23 @@ class MatrixBackend(BaseBackend):
             logger.log(ALWAYS, "[%s] Auth check failed: %s — check access_token and homeserver", self.name, resp)
             raise RuntimeError(f"Auth check failed for {self.name}: {resp}")
 
+    async def import_key_file(self) -> bool:
+        """Import encryption keys from a file exported by Element."""
+        key_file = self.config.get("key_import_file", "")
+        passphrase = self.config.get("key_import_passphrase", "")
+        if not key_file or not passphrase:
+            return False
+        if not os.path.isfile(key_file):
+            logger.warning("[%s] key_import_file not found: %s", self.name, key_file)
+            return False
+        try:
+            await self._get_client().import_keys(key_file, passphrase)
+            logger.log(ALWAYS, "[%s] Encryption keys imported from %s", self.name, key_file)
+            return True
+        except Exception as e:
+            logger.error("[%s] Failed to import key file: %s", self.name, e)
+            return False
+
     async def restore_key_backup(self) -> int:
         """Fetch megolm sessions from server key backup using the configured recovery_key."""
         recovery_key = self.config.get("recovery_key", "")
