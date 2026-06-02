@@ -84,16 +84,18 @@ def _derive_ssss_key_from_passphrase(passphrase: str, passphrase_info: dict) -> 
 def _derive_ssss_enc_keys(ssss_key: bytes, name: str) -> tuple[bytes, bytes]:
     """Returns (aes_key, hmac_key) derived via HKDF-SHA256.
 
-    matrix-js-sdk calls HKDF twice with identical params, so both keys are the
-    same 32 bytes — this matches the server-side behaviour.
+    matrix-js-sdk uses deriveBits(512) to get 64 bytes at once, then splits:
+      aes_key  = output[0:32]  (HKDF T(1))
+      hmac_key = output[32:64] (HKDF T(2))
+    The two keys are DIFFERENT because they come from different expansion rounds.
     """
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives import hashes
     derived = HKDF(
-        algorithm=hashes.SHA256(), length=32,
+        algorithm=hashes.SHA256(), length=64,
         salt=bytes(32), info=name.encode()
     ).derive(ssss_key)
-    return derived, derived
+    return derived[:32], derived[32:]
 
 
 def _ssss_decrypt(ssss_key: bytes, name: str, encrypted: dict) -> bytes:
