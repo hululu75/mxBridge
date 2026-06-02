@@ -291,7 +291,16 @@ async def restore_key_backup(
         # ── Step 5: decrypt backup private key ──────────────────────────────
         try:
             raw = _ssss_decrypt(ssss_key, "m.megolm_backup.v1", enc_for_key)
-            backup_priv = base64.b64decode(raw.decode().strip())
+            raw_str = raw.decode("utf-8").strip()
+            # Value may be JSON {"algorithm":..., "key":"base64"} or plain base64 string
+            try:
+                obj = json.loads(raw_str)
+                b64_str = obj["key"] if isinstance(obj, dict) else raw_str
+            except (json.JSONDecodeError, KeyError):
+                b64_str = raw_str
+            # Handle unpadded base64 (matrix-js-sdk sometimes omits trailing =)
+            b64_str += "=" * (-len(b64_str) % 4)
+            backup_priv = base64.b64decode(b64_str)
         except Exception as e:
             logger.error("[key_backup] Failed to decrypt backup key: %s", e)
             return 0
