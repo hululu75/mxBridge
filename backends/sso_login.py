@@ -825,38 +825,13 @@ async def _fill_keycloak_form(page, username: str, password: str, element_url: s
         logger.error("[sso] Login may have failed, checking page...")
         await _debug_screenshot(page)
 
-    totp_needed = "totp" in current_url.lower() or "otp" in current_url.lower()
-    if not totp_needed:
-        for sel in _INPUT_SELECTORS["otp"]:
-            try:
-                el = page.locator(sel).first
-                if await el.is_visible(timeout=500):
-                    totp_needed = True
-                    break
-            except Exception:
-                continue
-
-    if totp_needed:
-        totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
-        if totp_code:
-            filled = await _fill_field(page, "otp", totp_code)
-            if filled:
-                await _click_submit(page)
-                logger.info("[sso] TOTP submitted, waiting for redirect...")
-                await asyncio.sleep(5)
-                await page.wait_for_load_state("domcontentloaded")
-                logger.info("[sso] Current URL after TOTP: %s", page.url)
-            else:
-                logger.warning("[sso] No OTP field found despite detection, current URL: %s", page.url)
-                await _debug_screenshot(page)
-    else:
-        logger.info("[sso] No TOTP required, continuing...")
-
-    logger.info("[sso] Waiting for final redirect...")
-    for i in range(15):
+    logger.info("[sso] Waiting for redirect after password submit...")
+    totp_done = False
+    for i in range(20):
         await asyncio.sleep(2)
         new_url = page.url
         logger.info("[sso] post-login URL check %d: %s", i, new_url)
+
         if "consent" in new_url.lower():
             await _handle_consent_page(page)
             continue
@@ -868,6 +843,32 @@ async def _fill_keycloak_form(page, username: str, password: str, element_url: s
             logger.info("[sso] Redirected back to Element (hash route)")
             await asyncio.sleep(5)
             break
+
+        # TOTP may appear on the same Keycloak URL after password submit
+        if not totp_done:
+            otp_visible = False
+            for sel in _INPUT_SELECTORS["otp"]:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=500):
+                        otp_visible = True
+                        break
+                except Exception:
+                    continue
+            if otp_visible:
+                totp_code = getpass.getpass("[sso] TOTP verification code: ").strip()
+                totp_done = True
+                if totp_code:
+                    filled = await _fill_field(page, "otp", totp_code)
+                    if filled:
+                        await _click_submit(page)
+                        logger.info("[sso] TOTP submitted, waiting for redirect...")
+                        await asyncio.sleep(5)
+                        await page.wait_for_load_state("domcontentloaded")
+                        logger.info("[sso] URL after TOTP: %s", page.url)
+                    else:
+                        logger.warning("[sso] OTP field detected but could not fill it")
+
     await page.wait_for_load_state("domcontentloaded")
     await _debug_screenshot(page)
 
