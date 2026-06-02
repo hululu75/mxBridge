@@ -144,14 +144,12 @@ async def _try_refresh_token(homeserver: str, refresh_token: str) -> Optional[tu
             if not rt or not endpoint:
                 return None
             logger.info("[sso] Trying OIDC refresh: endpoint=%s client_id=%r", endpoint, client_id)
-            # Try with client_id first, then without (MAS/some providers don't need it)
-            for payload in [
-                {"grant_type": "refresh_token", "refresh_token": rt, "client_id": client_id},
-                {"grant_type": "refresh_token", "refresh_token": rt},
-            ]:
-                if not payload.get("client_id") and payload is not []:
-                    # skip empty client_id variant if first attempt with client_id also had none
-                    pass
+            # Build attempts: with client_id if available, then without as fallback
+            payloads = []
+            if client_id:
+                payloads.append({"grant_type": "refresh_token", "refresh_token": rt, "client_id": client_id})
+            payloads.append({"grant_type": "refresh_token", "refresh_token": rt})
+            for payload in payloads:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
                         endpoint,
@@ -574,34 +572,51 @@ async def _do_sso_flow(
         except Exception:
             pass
 
-    # Always extract OIDC session from localStorage — overrides on_response capture
-    # because localStorage has the issuer needed to construct the token endpoint.
+    # Always extract OIDC session from localStorage — has the client_id embedded in the key name.
+    # Key format: 'oidc.user:{issuer}:{client_id}'
+    # Token endpoint comes from OIDC discovery document (most reliable).
     try:
-        oidc_json = await page.evaluate("""() => {
+        oidc_json = await page.evaluate("""async () => {
             const keys = Object.keys(localStorage).filter(k => k.startsWith('oidc.user:'));
             for (const key of keys) {
                 try {
                     const data = JSON.parse(localStorage.getItem(key));
                     if (data && data.refresh_token) {
                         const issuer = (data.profile && data.profile.iss) || null;
-                        // Derive Keycloak token endpoint from issuer
-                        let token_endpoint = null;
-                        if (issuer) {
-                            if (issuer.includes('/realms/')) {
-                                token_endpoint = issuer + '/protocol/openid-connect/token';
-                            } else {
-                                token_endpoint = issuer + '/token';
+                        const normalizedIssuer = issuer ? issuer.replace(/\\/$/, '') : null;
+
+                        // Extract client_id: key = 'oidc.user:{issuer}:{client_id}'
+                        let client_id = '';
+                        if (normalizedIssuer) {
+                            const prefix = 'oidc.user:' + normalizedIssuer + ':';
+                            if (key.startsWith(prefix)) {
+                                client_id = key.substring(prefix.length);
                             }
                         }
-                        // client_id is the part of the key after the issuer
-                        const prefix = 'oidc.user:';
-                        const client_id = issuer
-                            ? key.substring(prefix.length + issuer.length + 1)
-                            : null;
+
+                        // Fetch token_endpoint from OIDC discovery document
+                        let token_endpoint = null;
+                        if (normalizedIssuer) {
+                            try {
+                                const resp = await fetch(
+                                    normalizedIssuer + '/.well-known/openid-configuration'
+                                );
+                                if (resp.ok) {
+                                    const meta = await resp.json();
+                                    token_endpoint = meta.token_endpoint || null;
+                                }
+                            } catch(e) {}
+                            if (!token_endpoint) {
+                                token_endpoint = normalizedIssuer + '/oauth2/token';
+                            }
+                        }
+
                         return JSON.stringify({
                             refresh_token: data.refresh_token,
                             token_endpoint: token_endpoint,
-                            client_id: client_id || '',
+                            client_id: client_id,
+                            _dbg_key: key,
+                            _dbg_issuer: normalizedIssuer,
                         });
                     }
                 } catch(e) {}
@@ -613,14 +628,21 @@ async def _do_sso_flow(
             oidc_data = _json.loads(oidc_json)
             rt = oidc_data.get("refresh_token", "")
             ep = oidc_data.get("token_endpoint", "")
+            cid = oidc_data.get("client_id", "")
+            logger.info("[sso] OIDC localStorage: key=%s issuer=%s client_id=%r endpoint=%s",
+                        oidc_data.get("_dbg_key", "?"), oidc_data.get("_dbg_issuer", "?"), cid, ep)
             if rt and ep:
                 refresh_token = _json.dumps({
                     "refresh_token": rt,
                     "token_endpoint": ep,
-                    "client_id": oidc_data.get("client_id", ""),
+                    "client_id": cid,
                 })
-                logger.info("[sso] OIDC session from localStorage: endpoint=%s client_id=%s",
-                            ep, oidc_data.get("client_id", ""))
+            elif rt and refresh_token.startswith("{"):
+                # on_response already captured endpoint; just update client_id
+                existing = _json.loads(refresh_token)
+                existing["client_id"] = cid
+                refresh_token = _json.dumps(existing)
+                logger.info("[sso] Updated refresh_token client_id=%r from localStorage key", cid)
             elif rt:
                 logger.info("[sso] OIDC refresh_token found but no token_endpoint in localStorage")
     except Exception as e:
