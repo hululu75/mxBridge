@@ -181,7 +181,7 @@ def _create_key_export_data(sessions: list, passphrase: str) -> str:
 
     salt = os.urandom(16)
     iv = os.urandom(16)
-    iterations = 100_000
+    iterations = 1_000  # temp file deleted immediately — no need for high iteration count
 
     derived = PBKDF2HMAC(
         algorithm=hashes.SHA512(), length=64, salt=salt, iterations=iterations
