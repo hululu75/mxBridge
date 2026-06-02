@@ -51,10 +51,8 @@ def _decode_recovery_key(key_str: str) -> bytes:
     Format: base58(0x8B 0x01 <32 bytes> <1-byte parity>)
     Accepts keys formatted with spaces, dashes, or colons as separators.
     """
-    # Strip all common separator characters used by different Matrix clients
-    clean = key_str.strip()
-    for sep in (" ", "-", ":"):
-        clean = clean.replace(sep, "")
+    # Keep only valid base58 characters — strips spaces, dashes, colons, quotes, etc.
+    clean = "".join(c for c in key_str if c in _BASE58_ALPHABET)
     logger.debug("[key_backup] Recovery key clean length=%d first4=%r", len(clean), clean[:4])
     raw = _base58_decode(clean)
     if len(raw) != 35:
