@@ -424,6 +424,28 @@ class MatrixBackend(BaseBackend):
             logger.log(ALWAYS, "[%s] Auth check failed: %s — check access_token and homeserver", self.name, resp)
             raise RuntimeError(f"Auth check failed for {self.name}: {resp}")
 
+    async def restore_key_backup(self) -> int:
+        """Fetch megolm sessions from server key backup using the configured recovery_key."""
+        recovery_key = self.config.get("recovery_key", "")
+        if not recovery_key:
+            logger.info("[%s] No recovery_key configured, skipping key backup restore", self.name)
+            return 0
+        from bridge.key_backup import restore_key_backup
+        client = self._get_client()
+        try:
+            n = await restore_key_backup(
+                client=client,
+                homeserver=self.config["homeserver"],
+                access_token=client.access_token,
+                recovery_key=recovery_key,
+            )
+            if n:
+                logger.log(ALWAYS, "[%s] Key backup restored: %d sessions imported", self.name, n)
+            return n
+        except Exception as e:
+            logger.error("[%s] Key backup restore failed: %s", self.name, e)
+            return 0
+
     async def _refresh_token_via_sso(self) -> bool:
         # Try silent refresh_token first — avoids launching a browser.
         refresh_token = self.config.get("refresh_token", "")
@@ -561,7 +583,11 @@ class MatrixBackend(BaseBackend):
                     self.name, session_id, age, sender,
                 )
             except Exception as e:
-                logger.warning("[%s] Re-request failed for session %s: %s", self.name, session_id, e)
+                msg = str(e)
+                if "already sent" in msg.lower():
+                    logger.debug("[%s] Key request already pending for session %s", self.name, session_id)
+                else:
+                    logger.warning("[%s] Re-request failed for session %s: %s", self.name, session_id, e)
             try:
                 devices = list(client.device_store.active_user_devices(sender))
                 if devices:

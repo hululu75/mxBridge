@@ -95,6 +95,10 @@ class MatrixSourceBackend(MatrixBackend):
                 self.name, len(failed_sessions),
             )
 
+        # Restore megolm sessions from server key backup (needed for backfill decryption)
+        if self.config.get("recovery_key"):
+            await self.restore_key_backup()
+
         self._running = True
         self._flush_task = asyncio.create_task(self._periodic_flush())
         self._key_upload_task = asyncio.create_task(self._periodic_key_upload())
