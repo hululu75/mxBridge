@@ -131,19 +131,12 @@ class MatrixTargetBackend(MatrixBackend):
                     continue
                 await self._state.mark_processed(event.event_id)
                 room = client.rooms.get(room_id)
-                sender_displayname = await self._get_sender_displayname(room, event.sender) if room else event.sender
                 logger.warning(
-                    "[%s] Detected undecrypted megolm event %s from %s",
+                    "[%s] Detected undecrypted megolm event %s from %s, requesting key",
                     self.name, event.event_id, event.sender,
                 )
-                try:
-                    await self.send_message(
-                        room_id,
-                        f"⛔ Unable to decrypt message from {sender_displayname}",
-                        "m.notice",
-                    )
-                except Exception:
-                    logger.error("[%s] Failed to send decryption failure notice", self.name)
+                if room and self.config.get("handle_encrypted", True):
+                    await self._enqueue_pending_encrypted(room, event, "no session")
 
     # -------------------------------------------------- key re-request hook
 
@@ -200,15 +193,6 @@ class MatrixTargetBackend(MatrixBackend):
         except Exception as e:
             logger.warning("[%s] Failed to decrypt: %s", self.name, e)
             await self._state.mark_processed(event.event_id)
-            sender_displayname = await self._get_sender_displayname(room, event.sender)
-            try:
-                await self.send_message(
-                    room.room_id,
-                    f"⛔ Unable to decrypt message from {sender_displayname}",
-                    "m.notice",
-                )
-            except Exception:
-                logger.error("[%s] Failed to send decryption failure notice", self.name)
             if self.config.get("handle_encrypted", True):
                 await self._enqueue_pending_encrypted(room, event, e)
             return
