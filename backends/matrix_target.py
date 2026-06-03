@@ -73,6 +73,11 @@ class MatrixTargetBackend(MatrixBackend):
         else:
             logger.warning("[%s] Target room %s not found after initial sync", self.name, self.target_room)
 
+        if self.config.get("key_import_file"):
+            await self.import_key_file()
+        if self.config.get("recovery_key"):
+            await self.restore_key_backup()
+
         self._sync_task = asyncio.create_task(self._sync_loop())
         logger.log(ALWAYS, "[%s] Started, monitoring target room: %s", self.name, self.target_room)
 
@@ -140,6 +145,17 @@ class MatrixTargetBackend(MatrixBackend):
                 except Exception:
                     logger.error("[%s] Failed to send decryption failure notice", self.name)
 
+    # -------------------------------------------------- key re-request hook
+
+    async def _before_key_rerequest(self, client: AsyncClient, enc_event) -> None:
+        try:
+            await client.cancel_key_share(enc_event)
+        except Exception:
+            pass
+
+    async def _on_pending_encrypted_enqueued(self, room, event, session_id: str, error) -> None:
+        await self._state.save_failed_decryption(session_id, room.room_id, event.event_id)
+
     # -------------------------------------------------- event callbacks
 
     async def _on_room_event(self, room, event) -> None:
@@ -202,23 +218,48 @@ class MatrixTargetBackend(MatrixBackend):
     async def _on_room_key_received(self, event) -> None:
         """Retry decryption of pending events when a new megolm session key arrives."""
         session_id = getattr(event, "session_id", None)
-        if not session_id or session_id not in self._pending_encrypted:
+        if not session_id:
             return
-        entry = self._pending_encrypted.pop(session_id)
-        pending = entry["events"]
-        for _, ev in pending:
-            self._pending_event_ids.discard(ev.event_id)
-        logger.info(
-            "[%s] Room key arrived for session %s, retrying %d pending event(s)",
-            self.name, session_id, len(pending),
-        )
+
         client = self._get_client()
-        for room, enc_event in pending:
+        handled_ids: set[str] = set()
+
+        if session_id in self._pending_encrypted:
+            entry = self._pending_encrypted.pop(session_id)
+            pending = entry["events"]
+            for _, ev in pending:
+                self._pending_event_ids.discard(ev.event_id)
+            logger.info(
+                "[%s] Room key arrived for session %s, retrying %d pending event(s)",
+                self.name, session_id, len(pending),
+            )
+            for room, enc_event in pending:
+                handled_ids.add(enc_event.event_id)
+                try:
+                    decrypted = await client.decrypt_event(enc_event)
+                    await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
+                except Exception as e:
+                    logger.warning("[%s] Retry decrypt failed for %s: %s", self.name, enc_event.event_id, e)
+
+        persisted = await self._state.pop_failed_decryptions(session_id)
+        persisted = [p for p in persisted if p["event_id"] not in handled_ids]
+        if persisted:
+            logger.info(
+                "[%s] Retrying %d persisted event(s) for session %s",
+                self.name, len(persisted), session_id,
+            )
+        for item in persisted:
             try:
-                decrypted = await client.decrypt_event(enc_event)
-                await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
+                resp = await client.room_get_event(item["room_id"], item["event_id"])
+                if not hasattr(resp, "event"):
+                    continue
+                decrypted = await client.decrypt_event(resp.event)
+                room = client.rooms.get(item["room_id"])
+                if room:
+                    await self._dispatch_decrypted(room, item["event_id"], decrypted)
+                    logger.info("[%s] Persisted event %s decrypted after key arrival", self.name, item["event_id"])
             except Exception as e:
-                logger.warning("[%s] Retry decrypt failed for %s: %s", self.name, enc_event.event_id, e)
+                logger.warning("[%s] Retry persisted event %s failed: %s", self.name, item["event_id"], e)
 
     # -------------------------------------------------- message handlers
 
