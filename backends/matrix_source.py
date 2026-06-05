@@ -149,7 +149,7 @@ class MatrixSourceBackend(MatrixBackend):
         pending = self._state.get_failed_decryption_sessions()
         if not pending:
             return
-        logger.info("[%s] Retrying %d persisted failed decryption(s)", self.name, len(pending))
+        logger.info("[%s] Requesting keys for %d persisted failed session(s)", self.name, len(pending))
         for session_id in pending:
             items = self._state._failed_decryptions.get(session_id, [])
             if not items:
@@ -160,26 +160,16 @@ class MatrixSourceBackend(MatrixBackend):
                 if hasattr(resp, "event") and hasattr(resp.event, "session_id"):
                     try:
                         await client.request_room_key(resp.event)
-                    except Exception:
-                        pass
+                        logger.info("[%s] Requested key for session %s (sender %s)", self.name, session_id, getattr(resp.event, "sender", "?"))
+                    except Exception as e:
+                        if "already sent" not in str(e).lower():
+                            logger.debug("[%s] Key request failed for %s: %s", self.name, session_id, e)
                     try:
                         await client.send_to_device_messages()
                     except Exception:
                         pass
             except Exception:
                 pass
-            for it in items:
-                try:
-                    resp = await client.room_get_event(it["room_id"], it["event_id"])
-                    if not hasattr(resp, "event"):
-                        continue
-                    decrypted = await client.decrypt_event(resp.event)
-                    room = client.rooms.get(it["room_id"])
-                    if room:
-                        await self._dispatch_decrypted(room, it["event_id"], decrypted)
-                        logger.info("[%s] Retry succeeded for event %s", self.name, it["event_id"])
-                except Exception as e:
-                    logger.debug("[%s] Retry failed for %s: %s", self.name, it["event_id"], e)
 
     async def _cleanup_stale_calls(self) -> None:
         while self._running:
