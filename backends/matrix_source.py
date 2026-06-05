@@ -140,25 +140,39 @@ class MatrixSourceBackend(MatrixBackend):
             logger.warning("[%s] Failed to claim keys for Olm sessions: %s", self.name, e)
             return
         pending = self._state.get_failed_decryption_sessions()
-        if pending:
-            logger.info("[%s] Retrying %d persisted failed decryption(s) with new Olm sessions", self.name, len(pending))
-            for session_id in pending:
-                items = await self._state.pop_failed_decryptions(session_id)
-                for item in items:
+        if not pending:
+            return
+        logger.info("[%s] Retrying %d persisted failed decryption(s)", self.name, len(pending))
+        for session_id in pending:
+            items = self._state._failed_decryptions.get(session_id, [])
+            if not items:
+                continue
+            item = items[0]
+            try:
+                resp = await client.room_get_event(item["room_id"], item["event_id"])
+                if hasattr(resp, "event") and hasattr(resp.event, "session_id"):
                     try:
-                        resp = await client.room_get_event(item["room_id"], item["event_id"])
-                        if not hasattr(resp, "event"):
-                            continue
-                        ev = resp.event
-                        if not hasattr(ev, "session_id"):
-                            continue
-                        decrypted = await client.decrypt_event(ev)
-                        room = client.rooms.get(item["room_id"])
-                        if room:
-                            await self._dispatch_decrypted(room, item["event_id"], decrypted)
-                            logger.info("[%s] Retry succeeded for event %s", self.name, item["event_id"])
-                    except Exception as e:
-                        logger.debug("[%s] Retry failed for %s: %s", self.name, item["event_id"], e)
+                        await client.request_room_key(resp.event)
+                    except Exception:
+                        pass
+                    try:
+                        await client.send_to_device_messages()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            for it in items:
+                try:
+                    resp = await client.room_get_event(it["room_id"], it["event_id"])
+                    if not hasattr(resp, "event"):
+                        continue
+                    decrypted = await client.decrypt_event(resp.event)
+                    room = client.rooms.get(it["room_id"])
+                    if room:
+                        await self._dispatch_decrypted(room, it["event_id"], decrypted)
+                        logger.info("[%s] Retry succeeded for event %s", self.name, it["event_id"])
+                except Exception as e:
+                    logger.debug("[%s] Retry failed for %s: %s", self.name, it["event_id"], e)
 
     async def _cleanup_stale_calls(self) -> None:
         while self._running:
