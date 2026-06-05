@@ -73,7 +73,7 @@ class MatrixSourceBackend(MatrixBackend):
 
         resp = await client.sync(timeout=3000, full_state=True)
         if isinstance(resp, SyncResponse):
-            logger.info("[%s] Initial sync done", self.name)
+            logger.info("[%s] Initial sync done – %d room(s): %s", self.name, len(client.rooms), list(client.rooms.keys()))
             if resp.next_batch:
                 await self._state.save_sync_token(self.name, resp.next_batch)
 
