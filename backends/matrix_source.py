@@ -130,12 +130,18 @@ class MatrixSourceBackend(MatrixBackend):
         if not claim_map:
             return
         try:
-            await client.keys_claim(claim_map)
+            resp = await client.keys_claim(claim_map)
             claimed_count = sum(len(v) for v in claim_map.values())
             logger.info(
                 "[%s] Proactively claimed one-time keys for %d device(s) across %d user(s)",
                 self.name, claimed_count, len(claim_map),
             )
+            if hasattr(resp, "failures") and resp.failures:
+                logger.warning("[%s] keys_claim failures: %s", self.name, resp.failures)
+            if hasattr(resp, "one_time_keys") and resp.one_time_keys:
+                for user_id, devices in resp.one_time_keys.items():
+                    for device_id, key_data in devices.items():
+                        logger.info("[%s] Got OTK for %s %s: %s", self.name, user_id, device_id, type(key_data).__name__)
         except Exception as e:
             logger.warning("[%s] Failed to claim keys for Olm sessions: %s", self.name, e)
             return
