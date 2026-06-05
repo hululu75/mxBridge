@@ -592,6 +592,12 @@ class MatrixBackend(BaseBackend):
             sender = enc_event.sender
             await self._before_key_rerequest(client, enc_event)
             try:
+                devices = list(client.device_store.active_user_devices(sender))
+                if devices:
+                    await client.keys_claim({sender: [d.id for d in devices]})
+            except Exception:
+                pass
+            try:
                 await client.request_room_key(enc_event)
                 entry["last_requested"] = now
                 age = int(now - entry["first_seen"])
@@ -606,9 +612,7 @@ class MatrixBackend(BaseBackend):
                 else:
                     logger.warning("[%s] Re-request failed for session %s: %s", self.name, session_id, e)
             try:
-                devices = list(client.device_store.active_user_devices(sender))
-                if devices:
-                    await client.keys_claim({sender: [d.id for d in devices]})
+                await client.send_to_device_messages()
             except Exception:
                 pass
 
@@ -652,16 +656,21 @@ class MatrixBackend(BaseBackend):
                 devices = list(client.device_store.active_user_devices(event.sender))
                 if devices:
                     await client.keys_claim({event.sender: [d.id for d in devices]})
+                    logger.info("[%s] Claimed one-time keys for %s (%d device(s))", self.name, event.sender, len(devices))
             except Exception:
                 pass
         if now - entry["last_requested"] >= KEY_RECHECK_INTERVAL:
             try:
                 await client.request_room_key(event)
                 entry["last_requested"] = now
-                logger.info("[%s] Requested missing room key for session %s", self.name, session_id)
+                logger.info("[%s] Requested missing room key for session %s (sender %s)", self.name, session_id, event.sender)
             except Exception as req_err:
                 if "already sent" not in str(req_err).lower():
                     logger.warning("[%s] Failed to request room key: %s", self.name, req_err)
+            try:
+                await client.send_to_device_messages()
+            except Exception:
+                pass
 
     async def _on_pending_encrypted_enqueued(self, room, event, session_id: str, error) -> None:
         pass

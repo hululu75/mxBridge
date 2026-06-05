@@ -73,7 +73,7 @@ class MatrixSourceBackend(MatrixBackend):
 
         resp = await client.sync(timeout=3000, full_state=True)
         if isinstance(resp, SyncResponse):
-            logger.info("[%s] Initial sync done – %d room(s): %s", self.name, len(client.rooms), list(client.rooms.keys()))
+            logger.info("[%s] Initial sync done – %d room(s)", self.name, len(client.rooms))
             if resp.next_batch:
                 await self._state.save_sync_token(self.name, resp.next_batch)
 
@@ -95,12 +95,12 @@ class MatrixSourceBackend(MatrixBackend):
                 self.name, len(failed_sessions),
             )
 
-        # Import keys from Element export file if configured
         if self.config.get("key_import_file"):
             await self.import_key_file()
-        # Restore megolm sessions from server key backup
         if self.config.get("recovery_key"):
             await self.restore_key_backup()
+
+        await self._ensure_olm_sessions()
 
         self._running = True
         self._flush_task = asyncio.create_task(self._periodic_flush())
@@ -109,6 +109,35 @@ class MatrixSourceBackend(MatrixBackend):
         self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
         self._sync_task = asyncio.create_task(self._sync_loop())
         logger.log(ALWAYS, "[%s] Started, beginning sync loop", self.name)
+
+    async def _ensure_olm_sessions(self) -> None:
+        client = self._get_client()
+        all_devices: dict[str, set[str]] = {}
+        for room_id, room in client.rooms.items():
+            if not room.encrypted:
+                continue
+            for user_id in room.users.keys():
+                if user_id == self.config.get("user_id", ""):
+                    continue
+                all_devices.setdefault(user_id, set())
+        if not all_devices:
+            return
+        claim_map: dict[str, list[str]] = {}
+        for user_id in all_devices:
+            device_ids = [d.id for d in client.device_store.active_user_devices(user_id)]
+            if device_ids:
+                claim_map[user_id] = device_ids
+        if not claim_map:
+            return
+        try:
+            await client.keys_claim(claim_map)
+            claimed_count = sum(len(v) for v in claim_map.values())
+            logger.info(
+                "[%s] Proactively claimed one-time keys for %d device(s) across %d user(s)",
+                self.name, claimed_count, len(claim_map),
+            )
+        except Exception as e:
+            logger.warning("[%s] Failed to claim keys for Olm sessions: %s", self.name, e)
 
     async def _cleanup_stale_calls(self) -> None:
         while self._running:
@@ -201,7 +230,6 @@ class MatrixSourceBackend(MatrixBackend):
     async def _on_room_event(self, room: MatrixRoom, event: Event) -> None:
         if self._state.is_processed(event.event_id):
             return
-        logger.info("[%s] room_event: %s in %s (type=%s)", self.name, event.event_id, room.room_id, type(event).__name__)
         await self._state.mark_processed(event.event_id)
 
         from_self = event.sender == self.config["user_id"]
@@ -292,6 +320,12 @@ class MatrixSourceBackend(MatrixBackend):
             if rt != "m.read":
                 continue
             await self._emit_read_receipt(receipt.event_id, room.room_id)
+
+    async def _after_sync(self, client, resp):
+        for room_id, room_info in resp.rooms.join.items():
+            count = len(room_info.timeline.events)
+            if count > 0:
+                logger.info("[%s] sync: room %s got %d timeline event(s)", self.name, room_id, count)
 
     async def _on_room_key_received(self, event) -> None:
         session_id = getattr(event, "session_id", None)
