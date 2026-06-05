@@ -201,6 +201,7 @@ class MatrixSourceBackend(MatrixBackend):
     async def _on_room_event(self, room: MatrixRoom, event: Event) -> None:
         if self._state.is_processed(event.event_id):
             return
+        logger.info("[%s] room_event: %s in %s (type=%s)", self.name, event.event_id, room.room_id, type(event).__name__)
         await self._state.mark_processed(event.event_id)
 
         from_self = event.sender == self.config["user_id"]
@@ -246,7 +247,7 @@ class MatrixSourceBackend(MatrixBackend):
         try:
             decrypted = await self._get_client().decrypt_event(event)
         except Exception as e:
-            logger.warning("[%s] Failed to decrypt event %s: %s", self.name, event.event_id, e)
+            logger.warning("[%s] Failed to decrypt event %s in room %s: %s", self.name, event.event_id, room.room_id, e)
             await self._state.mark_processed(event.event_id)
             if not from_self:
                 await self._enqueue_pending_encrypted(room, event, e)
