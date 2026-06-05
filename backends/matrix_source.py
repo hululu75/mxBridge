@@ -115,10 +115,15 @@ class MatrixSourceBackend(MatrixBackend):
         own_user_id = self.config.get("user_id", "")
         own_device_id = client.device_id
         all_devices: dict[str, list[str]] = {}
-        for user_id in all_devices:
-            device_ids = [d.id for d in client.device_store.active_user_devices(user_id)]
-            if device_ids:
-                all_devices[user_id] = device_ids
+        for room_id, room in client.rooms.items():
+            if not room.encrypted:
+                continue
+            for user_id in room.users.keys():
+                if user_id in all_devices:
+                    continue
+                device_ids = [d.id for d in client.device_store.active_user_devices(user_id)]
+                if device_ids:
+                    all_devices[user_id] = device_ids
         own_other_devices = [
             d.id for d in client.device_store.active_user_devices(own_user_id)
             if d.id != own_device_id
