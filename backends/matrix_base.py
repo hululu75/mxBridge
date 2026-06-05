@@ -17,6 +17,7 @@ from nio import (
     AsyncClientConfig,
     DownloadError,
     ForwardedRoomKeyEvent,
+    InviteEvent,
     KeyVerificationEvent,
     KeyVerificationKey,
     KeyVerificationMac,

@@ -138,6 +138,26 @@ class MatrixSourceBackend(MatrixBackend):
             )
         except Exception as e:
             logger.warning("[%s] Failed to claim keys for Olm sessions: %s", self.name, e)
+            return
+        pending = self._state.get_failed_decryption_sessions()
+        if pending:
+            logger.info("[%s] Retrying %d persisted failed decryption(s) with new Olm sessions", self.name, len(pending))
+            for session_id, items in pending.items():
+                for item in items:
+                    try:
+                        resp = await client.room_get_event(item["room_id"], item["event_id"])
+                        if not hasattr(resp, "event"):
+                            continue
+                        ev = resp.event
+                        if not hasattr(ev, "session_id"):
+                            continue
+                        decrypted = await client.decrypt_event(ev)
+                        room = client.rooms.get(item["room_id"])
+                        if room:
+                            await self._dispatch_decrypted(room, item["event_id"], decrypted)
+                            logger.info("[%s] Retry succeeded for event %s", self.name, item["event_id"])
+                    except Exception as e:
+                        logger.debug("[%s] Retry failed for %s: %s", self.name, item["event_id"], e)
 
     async def _cleanup_stale_calls(self) -> None:
         while self._running:
