@@ -76,6 +76,8 @@ class BridgeCore:
     async def start(self) -> None:
         self._source.on_message(self._on_source_message)
         self._source.on_read_receipt(self._on_source_read_receipt)
+        if self._store:
+            self._source.on_new_room(self._on_new_source_room)
         if self._media_dir:
             os.makedirs(self._media_dir, exist_ok=True)
             logger.info("Media files will be saved to %s", self._media_dir)
@@ -124,6 +126,32 @@ class BridgeCore:
         if self._source_started:
             backends.append(self._source.stop())
         await asyncio.gather(*backends, return_exceptions=True)
+
+    async def _on_new_source_room(self, room_id: str) -> None:
+        if not self._store:
+            return
+        try:
+            from scripts.backfill import backfill_room, _get_room_name
+            import argparse
+            client = self._source._get_client()
+            room = client.rooms.get(room_id)
+            if not room:
+                return
+            room_name = _get_room_name(room)
+            logger.info("Auto-backfill triggered for new room: %s", room_name)
+            args = argparse.Namespace(
+                days=0,
+                limit=0,
+                no_media=not bool(self._media_dir),
+                dry_run=False,
+                media_dir=self._media_dir,
+                media_max_size=self._source.config.get("media_max_size", 50 * 1024 * 1024),
+            )
+            count = await backfill_room(client, self._store, room_id, room_name, args)
+            await asyncio.to_thread(self._store.reconcile_edits)
+            logger.info("Auto-backfill complete for %s: %d messages saved", room_name, count)
+        except Exception as e:
+            logger.error("Auto-backfill failed for room %s: %s", room_id, e, exc_info=True)
 
     async def _store_message(self, msg: BridgeMessage) -> None:
         if self._store:

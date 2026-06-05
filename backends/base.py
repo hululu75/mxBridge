@@ -12,12 +12,16 @@ class BaseBackend(ABC):
         self.config = config
         self._message_callback: Optional[Callable[[BridgeMessage], Awaitable[None]]] = None
         self._read_receipt_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
+        self._new_room_callback: Optional[Callable[[str], Awaitable[None]]] = None
 
     def on_message(self, callback: Callable[[BridgeMessage], Awaitable[None]]) -> None:
         self._message_callback = callback
 
     def on_read_receipt(self, callback: Callable[[str, str], Awaitable[None]]) -> None:
         self._read_receipt_callback = callback
+
+    def on_new_room(self, callback: Callable[[str], Awaitable[None]]) -> None:
+        self._new_room_callback = callback
 
     async def _emit_message(self, message: BridgeMessage) -> None:
         if self._message_callback is not None:

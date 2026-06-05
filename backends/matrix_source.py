@@ -358,6 +358,13 @@ class MatrixSourceBackend(MatrixBackend):
             count = len(room_info.timeline.events)
             if count > 0:
                 logger.info("[%s] sync: room %s got %d timeline event(s)", self.name, room_id, count)
+            if not hasattr(self, "_known_room_ids"):
+                self._known_room_ids: set[str] = set(client.rooms.keys())
+            if room_id not in self._known_room_ids:
+                self._known_room_ids.add(room_id)
+                logger.info("[%s] New room detected: %s", self.name, room_id)
+                if self._new_room_callback:
+                    asyncio.create_task(self._new_room_callback(room_id))
 
     async def _on_room_key_received(self, event) -> None:
         session_id = getattr(event, "session_id", None)

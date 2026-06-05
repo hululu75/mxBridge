@@ -60,12 +60,6 @@ def _normalize_date_to(date_to: str) -> str:
     return date_to
 
 
-def _date_to_ms(date_str: str) -> int:
-    if len(date_str) <= 10:
-        date_str += " 00:00:00"
-    dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
-
 
 class Message(peewee.Model):
     timestamp = peewee.DateTimeField(default=_utcnow)
@@ -441,6 +435,21 @@ class MessageStore:
             logger.warning("Failed to check/migrate messages table schema", exc_info=True)
 
         try:
+            cur = db.execute_sql(
+                "SELECT COUNT(*) FROM messages WHERE typeof(timestamp) = 'integer'"
+            )
+            int_count = cur.fetchone()[0]
+            if int_count:
+                db.execute_sql(
+                    "UPDATE messages "
+                    "SET timestamp = datetime(CAST(timestamp AS REAL) / 1000, 'unixepoch') "
+                    "WHERE typeof(timestamp) = 'integer'"
+                )
+                logger.info("Migrated %d integer timestamps to datetime strings", int_count)
+        except Exception:
+            logger.warning("Failed to migrate integer timestamps", exc_info=True)
+
+        try:
             key = "migrated_aliases_v1"
             row = BridgeConfig.get_or_none(BridgeConfig.key == key)
             if not row:
@@ -574,10 +583,13 @@ class MessageStore:
         media_local_path = ""
         if media_dir and msg.media_data:
             media_local_path = self._save_media_file(msg, media_dir)
+        ts = msg.timestamp
+        if isinstance(ts, (int, float)):
+            ts = datetime.utcfromtimestamp(ts / 1000)
         try:
             with db.atomic():
                 row = Message.create(
-                    timestamp=msg.timestamp,
+                    timestamp=ts,
                     direction=msg.direction.value,
                     source_room_id=msg.source_room_id,
                     source_room_name=msg.source_room_name,
@@ -846,10 +858,10 @@ class MessageStore:
             params.append(sender)
         if date_from and _validate_date(date_from):
             clauses.append("m.timestamp >= ?")
-            params.append(_date_to_ms(date_from))
+            params.append(date_from)
         if date_to and _validate_date(date_to):
             clauses.append("m.timestamp <= ?")
-            params.append(_date_to_ms(_normalize_date_to(date_to)))
+            params.append(_normalize_date_to(date_to))
 
         where = " AND ".join(clauses)
         cols = ", ".join(f"m.{c}" for c in MESSAGE_COLUMNS)
@@ -890,10 +902,10 @@ class MessageStore:
             params.append(sender)
         if date_from and _validate_date(date_from):
             clauses.append("timestamp >= ?")
-            params.append(_date_to_ms(date_from))
+            params.append(date_from)
         if date_to and _validate_date(date_to):
             clauses.append("timestamp <= ?")
-            params.append(_date_to_ms(_normalize_date_to(date_to)))
+            params.append(_normalize_date_to(date_to))
 
         cols = ", ".join(MESSAGE_COLUMNS)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -969,6 +981,8 @@ class MessageStore:
             last_msg = row[4]
             if isinstance(last_msg, datetime):
                 last_msg = last_msg.isoformat()
+            elif isinstance(last_msg, (int, float)):
+                last_msg = datetime.utcfromtimestamp(last_msg / 1000).isoformat()
             elif isinstance(last_msg, str):
                 last_msg = last_msg.replace(" ", "T")
             results.append({
