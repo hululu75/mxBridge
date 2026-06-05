@@ -142,7 +142,8 @@ class MatrixSourceBackend(MatrixBackend):
         pending = self._state.get_failed_decryption_sessions()
         if pending:
             logger.info("[%s] Retrying %d persisted failed decryption(s) with new Olm sessions", self.name, len(pending))
-            for session_id, items in pending.items():
+            for session_id in pending:
+                items = await self._state.pop_failed_decryptions(session_id)
                 for item in items:
                     try:
                         resp = await client.room_get_event(item["room_id"], item["event_id"])
