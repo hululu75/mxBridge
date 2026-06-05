@@ -112,32 +112,28 @@ class MatrixSourceBackend(MatrixBackend):
 
     async def _ensure_olm_sessions(self) -> None:
         client = self._get_client()
-        all_devices: dict[str, set[str]] = {}
-        for room_id, room in client.rooms.items():
-            if not room.encrypted:
-                continue
-            for user_id in room.users.keys():
-                if user_id == self.config.get("user_id", ""):
-                    continue
-                all_devices.setdefault(user_id, set())
-        if not all_devices:
-            return
-        claim_map: dict[str, list[str]] = {}
+        own_user_id = self.config.get("user_id", "")
+        own_device_id = client.device_id
+        all_devices: dict[str, list[str]] = {}
         for user_id in all_devices:
             device_ids = [d.id for d in client.device_store.active_user_devices(user_id)]
             if device_ids:
-                claim_map[user_id] = device_ids
-        if not claim_map:
+                all_devices[user_id] = device_ids
+        own_other_devices = [
+            d.id for d in client.device_store.active_user_devices(own_user_id)
+            if d.id != own_device_id
+        ]
+        if own_other_devices:
+            all_devices[own_user_id] = own_other_devices
+        if not all_devices:
             return
         try:
-            resp = await client.keys_claim(claim_map)
-            claimed_count = sum(len(v) for v in claim_map.values())
+            resp = await client.keys_claim(all_devices)
+            claimed_count = sum(len(v) for v in all_devices.values())
             logger.info(
-                "[%s] Proactively claimed one-time keys for %d device(s) across %d user(s)",
-                self.name, claimed_count, len(claim_map),
+                "[%s] Proactively claimed one-time keys for %d device(s) across %d user(s) (incl. own)",
+                self.name, claimed_count, len(all_devices),
             )
-            if hasattr(resp, "failures") and resp.failures:
-                logger.warning("[%s] keys_claim failures: %s", self.name, resp.failures)
             if hasattr(resp, "one_time_keys") and resp.one_time_keys:
                 for user_id, devices in resp.one_time_keys.items():
                     for device_id, key_data in devices.items():
