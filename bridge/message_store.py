@@ -1001,12 +1001,20 @@ class MessageStore:
 
     def get_rooms(self) -> list[dict]:
         cur = db.execute_sql(
+            "SELECT source_room_id, source_room_name, best_name, cnt, last_msg FROM ("
             "SELECT m.source_room_id, m.source_room_name, "
             "COALESCE(ra.room_name, m.source_room_name, m.source_room_id) as best_name, "
             "COUNT(*) as cnt, MAX(m.timestamp) as last_msg "
             "FROM messages m "
             "LEFT JOIN room_aliases ra ON ra.room_id = m.source_room_id "
-            "GROUP BY m.source_room_id ORDER BY last_msg DESC LIMIT ?",
+            "GROUP BY m.source_room_id "
+            "UNION ALL "
+            "SELECT ra2.room_id, '', "
+            "COALESCE(ra2.room_name, ra2.room_id) as best_name, "
+            "0 as cnt, NULL as last_msg "
+            "FROM room_aliases ra2 "
+            "WHERE ra2.room_id NOT IN (SELECT DISTINCT source_room_id FROM messages) "
+            ") ORDER BY last_msg DESC LIMIT ?",
             (ROOMS_LIMIT,),
         )
         results = []

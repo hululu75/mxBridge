@@ -86,6 +86,7 @@ class BridgeCore:
             await self._source.start()
             self._source_started = True
             self._forwarding_enabled = True
+            await self._sync_room_aliases()
             logger.log(ALWAYS, "Backup mode active: saving messages to store (no forwarding)")
             return
         assert self._target is not None
@@ -101,6 +102,7 @@ class BridgeCore:
             self._forwarding_enabled = True
             await self._source.start()
             self._source_started = True
+            await self._sync_room_aliases()
             if self._forwarding_paused:
                 logger.log(ALWAYS, "Source and target ready, forwarding is paused. Send !resume to resume.")
             else:
@@ -152,6 +154,26 @@ class BridgeCore:
             logger.info("Auto-backfill complete for %s: %d messages saved", room_name, count)
         except Exception as e:
             logger.error("Auto-backfill failed for room %s: %s", room_id, e, exc_info=True)
+
+    async def _sync_room_aliases(self) -> None:
+        if not self._store or not self._source_started:
+            return
+        try:
+            client = self._source._get_client()
+            aliases: dict[str, str] = {}
+            for room_id, room in client.rooms.items():
+                name = room.name or room.canonical_alias or ""
+                if not name:
+                    display = room.display_name or ""
+                    if display and display.lower().replace(" ", "") not in ("emptyroom", "empty"):
+                        name = display
+                if name and name != room_id:
+                    aliases[room_id] = name
+            if aliases:
+                await asyncio.to_thread(self._store.batch_upsert_aliases, {}, aliases)
+                logger.info("Synced room aliases for %d rooms", len(aliases))
+        except Exception as e:
+            logger.warning("Failed to sync room aliases: %s", e)
 
     async def _store_message(self, msg: BridgeMessage) -> None:
         if self._store:
