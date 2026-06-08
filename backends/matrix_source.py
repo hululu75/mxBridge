@@ -151,7 +151,7 @@ class MatrixSourceBackend(MatrixBackend):
             return
         logger.info("[%s] Requesting keys for %d persisted failed session(s)", self.name, len(pending))
         for session_id in pending:
-            items = self._state._failed_decryptions.get(session_id, [])
+            items = self._state.get_failed_decryption_events(session_id)
             if not items:
                 continue
             item = items[0]
@@ -309,8 +309,7 @@ class MatrixSourceBackend(MatrixBackend):
         except Exception as e:
             logger.warning("[%s] Failed to decrypt event %s in room %s: %s", self.name, event.event_id, room.room_id, e)
             await self._state.mark_processed(event.event_id)
-            if not from_self:
-                await self._enqueue_pending_encrypted(room, event, e)
+            await self._enqueue_pending_encrypted(room, event, e)
             return
 
         if not isinstance(decrypted, RoomMessage):
@@ -383,13 +382,25 @@ class MatrixSourceBackend(MatrixBackend):
                 "[%s] Room key arrived for session %s, retrying %d in-memory event(s)",
                 self.name, session_id, len(pending),
             )
+            failed: list[tuple] = []
             for room, enc_event in pending:
-                handled_ids.add(enc_event.event_id)
                 try:
                     decrypted = await client.decrypt_event(enc_event)
                     await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
+                    handled_ids.add(enc_event.event_id)
                 except Exception as e:
                     logger.warning("[%s] Retry decrypt failed for %s: %s", self.name, enc_event.event_id, e)
+                    failed.append((room, enc_event))
+            if failed:
+                new_entry = self._pending_encrypted.setdefault(session_id, {
+                    "events": [], "first_seen": entry.get("first_seen", time.monotonic()),
+                    "last_requested": entry.get("last_requested", 0.0),
+                })
+                for room, enc_event in failed:
+                    if enc_event.event_id not in self._pending_event_ids:
+                        self._pending_event_ids.add(enc_event.event_id)
+                        new_entry["events"].append((room, enc_event))
+                    await self._state.save_failed_decryption(session_id, room.room_id, enc_event.event_id)
 
         # Retry persisted events (cross-restart scenario)
         persisted = await self._state.pop_failed_decryptions(session_id)
@@ -408,9 +419,11 @@ class MatrixSourceBackend(MatrixBackend):
                 room = client.rooms.get(item["room_id"])
                 if room:
                     await self._dispatch_decrypted(room, item["event_id"], decrypted)
+                    handled_ids.add(item["event_id"])
                     logger.info("[%s] Persisted event %s decrypted after key arrival", self.name, item["event_id"])
             except Exception as e:
                 logger.warning("[%s] Retry persisted event %s failed: %s", self.name, item["event_id"], e)
+                await self._state.save_failed_decryption(session_id, item["room_id"], item["event_id"])
 
     # -------------------------------------------------- message handlers
 

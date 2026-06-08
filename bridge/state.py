@@ -307,6 +307,9 @@ class StateManager:
     def get_failed_decryption_sessions(self) -> list[str]:
         return list(self._failed_decryptions.keys())
 
+    def get_failed_decryption_events(self, session_id: str) -> list[dict]:
+        return list(self._failed_decryptions.get(session_id, []))
+
     # -------------------------------------------------- flush (no-op for SQLite)
 
     async def flush(self) -> None:
