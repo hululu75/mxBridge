@@ -62,6 +62,18 @@ class MatrixSourceBackend(MatrixBackend):
             client.next_batch = saved_token
             logger.info("[%s] Resumed from sync token", self.name)
 
+        own_device_id = client.device_id or ""
+        own_ed25519 = client.olm_account_identity_keys.get("ed25519", "?") if hasattr(client, "olm_account_identity_keys") else "?"
+        own_curve25519 = client.olm_account_identity_keys.get("curve25519", "?") if hasattr(client, "olm_account_identity_keys") else "?"
+        logger.log(ALWAYS,
+            "[%s] Bridge device: id=%s ed25519=%s curve25519=%s",
+            self.name, own_device_id, own_ed25519[:16] + "...", own_curve25519[:16] + "...",
+        )
+        logger.info(
+            "[%s] Verify in Element that these keys match Settings → Security → Sessions → %s",
+            self.name, own_device_id,
+        )
+
         client.add_event_callback(
             self._on_room_event,
             (RoomMessage, CallInviteEvent, CallAnswerEvent, CallHangupEvent),
@@ -135,7 +147,18 @@ class MatrixSourceBackend(MatrixBackend):
         self._call_cleanup_task = asyncio.create_task(self._cleanup_stale_calls())
         self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
         self._sync_task = asyncio.create_task(self._sync_loop())
-        logger.log(ALWAYS, "[%s] Started, beginning sync loop", self.name)
+
+        encrypted_rooms = sum(1 for r in client.rooms.values() if r.encrypted)
+        megolm_sessions = 0
+        try:
+            megolm_sessions = len(client.olm_account_session_cache) if hasattr(client, "olm_account_session_cache") else 0
+        except Exception:
+            pass
+        logger.log(
+            ALWAYS,
+            "[%s] Started: device=%s encrypted_rooms=%d megolm_sessions=%d pending_decrypt=%d",
+            self.name, own_device_id, encrypted_rooms, megolm_sessions, len(self._pending_encrypted),
+        )
 
     async def _ensure_olm_sessions(self) -> None:
         client = self._get_client()
@@ -357,7 +380,24 @@ class MatrixSourceBackend(MatrixBackend):
         try:
             decrypted = await self._get_client().decrypt_event(event)
         except Exception as e:
-            logger.warning("[%s] Failed to decrypt event %s in room %s: %s", self.name, event.event_id, room.room_id, e)
+            err_str = str(e)
+            session_id = getattr(event, "session_id", "?")
+            sender_key = getattr(event, "sender_key", "?")
+            device_id = getattr(event, "device_id", "?")
+            logger.warning(
+                "[%s] Failed to decrypt %s in %s: %s "
+                "(sender=%s sender_key=%s device_id=%s session_id=%s)",
+                self.name, event.event_id, room.room_id, err_str,
+                event.sender, sender_key[:12] + "...", device_id, session_id[:12] + "...",
+            )
+            if "no session" in err_str.lower():
+                sender_devices = list(self._get_client().device_store.active_user_devices(event.sender))
+                logger.info(
+                    "[%s] Sender %s has %d known device(s). "
+                    "Bridge may not have received the megolm session key. "
+                    "Verify this bridge device in Element to enable key sharing.",
+                    self.name, event.sender, len(sender_devices),
+                )
             await self._state.mark_processed(event.event_id)
             placeholder = BridgeMessage(
                 source_room_id=room.room_id,
@@ -428,6 +468,20 @@ class MatrixSourceBackend(MatrixBackend):
                 logger.info("[%s] New room detected: %s", self.name, room_id)
                 if self._new_room_callback:
                     asyncio.create_task(self._new_room_callback(room_id))
+
+        to_device = resp.to_device_events if hasattr(resp, "to_device_events") else []
+        if to_device:
+            for ev in to_device:
+                ev_type = type(ev).__name__
+                session_id = getattr(ev, "session_id", None)
+                sender = getattr(ev, "sender", "?")
+                if session_id:
+                    logger.info(
+                        "[%s] to-device: %s from %s session_id=%s",
+                        self.name, ev_type, sender, session_id[:16] + "...",
+                    )
+                elif ev_type not in ("KeyVerificationEvent", "UnknownToDeviceEvent"):
+                    logger.debug("[%s] to-device: %s from %s", self.name, ev_type, sender)
 
     async def _on_room_key_received(self, event) -> None:
         session_id = getattr(event, "session_id", None)
