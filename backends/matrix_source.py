@@ -98,7 +98,34 @@ class MatrixSourceBackend(MatrixBackend):
         if self.config.get("key_import_file"):
             await self.import_key_file()
         if self.config.get("recovery_key"):
-            await self.restore_key_backup()
+            n = await self.restore_key_backup()
+            if n:
+                logger.log(ALWAYS, "[%s] Key backup restored %d session(s) — retrying failed decryptions", self.name, n)
+                retry_sessions = self._state.get_failed_decryption_sessions()
+                if retry_sessions:
+                    for sid in retry_sessions:
+                        items = self._state.get_failed_decryption_events(sid)
+                        for it in items:
+                            try:
+                                resp = await client.room_get_event(it["room_id"], it["event_id"])
+                                if hasattr(resp, "event"):
+                                    decrypted = await client.decrypt_event(resp.event)
+                                    room = client.rooms.get(it["room_id"])
+                                    if room:
+                                        await self._dispatch_decrypted(room, it["event_id"], decrypted)
+                                        await self._state.pop_failed_decryptions(sid)
+                                        logger.info("[%s] Decrypted persisted event %s after key backup", self.name, it["event_id"])
+                            except Exception:
+                                pass
+        else:
+            encrypted_count = sum(1 for r in client.rooms.values() if r.encrypted)
+            if encrypted_count:
+                logger.log(
+                    ALWAYS,
+                    "[%s] No recovery_key configured — %d encrypted room(s) may have undecryptable messages. "
+                    "Set source.recovery_key in config to restore keys from server backup.",
+                    self.name, encrypted_count,
+                )
 
         await self._ensure_olm_sessions()
 
@@ -115,9 +142,11 @@ class MatrixSourceBackend(MatrixBackend):
         own_user_id = self.config.get("user_id", "")
         own_device_id = client.device_id
         all_devices: dict[str, list[str]] = {}
+        encrypted_room_count = 0
         for room_id, room in client.rooms.items():
             if not room.encrypted:
                 continue
+            encrypted_room_count += 1
             for user_id in room.users.keys():
                 if user_id in all_devices:
                     continue
@@ -149,7 +178,11 @@ class MatrixSourceBackend(MatrixBackend):
         pending = self._state.get_failed_decryption_sessions()
         if not pending:
             return
-        logger.info("[%s] Requesting keys for %d persisted failed session(s)", self.name, len(pending))
+        logger.info(
+            "[%s] Requesting keys for %d persisted failed session(s) across %d encrypted room(s)",
+            self.name, len(pending), encrypted_room_count,
+        )
+        re_enqueued = 0
         for session_id in pending:
             items = self._state.get_failed_decryption_events(session_id)
             if not items:
@@ -157,10 +190,25 @@ class MatrixSourceBackend(MatrixBackend):
             item = items[0]
             try:
                 resp = await client.room_get_event(item["room_id"], item["event_id"])
-                if hasattr(resp, "event") and hasattr(resp.event, "session_id"):
+                if not hasattr(resp, "event"):
+                    continue
+                enc_event = resp.event
+                room = client.rooms.get(item["room_id"])
+                if room and enc_event.event_id not in self._pending_event_ids:
+                    now = time.monotonic()
+                    entry = self._pending_encrypted.setdefault(session_id, {
+                        "events": [], "first_seen": now, "last_requested": 0.0,
+                    })
+                    entry["events"].append((room, enc_event))
+                    self._pending_event_ids.add(enc_event.event_id)
+                    re_enqueued += 1
+                if hasattr(enc_event, "session_id"):
                     try:
-                        await client.request_room_key(resp.event)
-                        logger.info("[%s] Requested key for session %s (sender %s)", self.name, session_id, getattr(resp.event, "sender", "?"))
+                        await client.request_room_key(enc_event)
+                        logger.info(
+                            "[%s] Requested key for session %s (sender %s, room %s)",
+                            self.name, session_id, getattr(enc_event, "sender", "?"), item["room_id"],
+                        )
                     except Exception as e:
                         if "already sent" not in str(e).lower():
                             logger.debug("[%s] Key request failed for %s: %s", self.name, session_id, e)
@@ -170,6 +218,8 @@ class MatrixSourceBackend(MatrixBackend):
                         pass
             except Exception:
                 pass
+        if re_enqueued:
+            logger.info("[%s] Re-enqueued %d event(s) into pending queue for periodic key retry", self.name, re_enqueued)
 
     async def _cleanup_stale_calls(self) -> None:
         while self._running:
