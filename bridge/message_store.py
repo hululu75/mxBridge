@@ -612,12 +612,45 @@ class MessageStore:
                     reply_to_event_id=msg.reply_to_event_id or "",
                 )
         except peewee.IntegrityError:
-            if media_local_path:
-                full_path = os.path.join(media_dir, media_local_path)
+            try:
+                old_media_path = ""
                 try:
-                    os.unlink(full_path)
-                except OSError:
+                    old = Message.get(Message.event_id == msg.event_id)
+                    old_media_path = old.media_local_path or ""
+                except Message.DoesNotExist:
                     pass
+                Message.update(
+                    timestamp=ts,
+                    direction=msg.direction.value,
+                    source_room_name=msg.source_room_name,
+                    sender_displayname=msg.sender_displayname,
+                    text=msg.text,
+                    msgtype=msg.msgtype.value,
+                    target_room_id=msg.target_room_id or "",
+                    media_url=msg.media_url or "",
+                    media_filename=msg.media_filename or "",
+                    media_mimetype=msg.media_mimetype or "",
+                    media_size=msg.media_size or 0,
+                    media_local_path=media_local_path,
+                    call_type=msg.call_type or "",
+                    call_action=msg.call_action.value if msg.call_action else "",
+                    call_duration=msg.call_duration or 0,
+                    from_self=msg.from_self,
+                    edit_of_event_id=msg.edit_of_event_id or "",
+                    reply_to_event_id=msg.reply_to_event_id or "",
+                ).where(Message.event_id == msg.event_id).execute()
+                if old_media_path and old_media_path != media_local_path and media_dir:
+                    try:
+                        os.unlink(os.path.join(media_dir, old_media_path))
+                    except OSError:
+                        pass
+            except Exception:
+                logger.error("Failed to update message %s on duplicate", msg.event_id, exc_info=True)
+                if media_local_path and media_dir:
+                    try:
+                        os.unlink(os.path.join(media_dir, media_local_path))
+                    except OSError:
+                        pass
         except Exception:
             logger.error("Failed to save message %s", msg.event_id, exc_info=True)
 

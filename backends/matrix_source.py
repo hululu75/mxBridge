@@ -309,6 +309,20 @@ class MatrixSourceBackend(MatrixBackend):
         except Exception as e:
             logger.warning("[%s] Failed to decrypt event %s in room %s: %s", self.name, event.event_id, room.room_id, e)
             await self._state.mark_processed(event.event_id)
+            placeholder = BridgeMessage(
+                source_room_id=room.room_id,
+                source_room_name=await self._get_room_name(room),
+                sender=event.sender,
+                sender_displayname=await self._get_sender_displayname(room, event.sender),
+                text="[Encrypted message \u2013 awaiting decryption key]",
+                timestamp=event.server_timestamp,
+                event_id=event.event_id,
+                backend_name=self.name,
+                direction=MessageDirection.FORWARD,
+                msgtype=MessageType.TEXT,
+                from_self=from_self,
+            )
+            await self._emit_message(placeholder)
             await self._enqueue_pending_encrypted(room, event, e)
             return
 
@@ -369,6 +383,10 @@ class MatrixSourceBackend(MatrixBackend):
         session_id = getattr(event, "session_id", None)
         if not session_id:
             return
+        logger.info(
+            "[%s] Room key received: session_id=%s, sender=%s, type=%s",
+            self.name, session_id, getattr(event, "sender", "?"), type(event).__name__,
+        )
         client = self._get_client()
         handled_ids: set[str] = set()
 
@@ -424,6 +442,17 @@ class MatrixSourceBackend(MatrixBackend):
             except Exception as e:
                 logger.warning("[%s] Retry persisted event %s failed: %s", self.name, item["event_id"], e)
                 await self._state.save_failed_decryption(session_id, item["room_id"], item["event_id"])
+
+        remaining = len(self._pending_encrypted)
+        remaining_persisted = sum(len(v) for v in self._failed_decryptions_snapshot())
+        if remaining or remaining_persisted:
+            logger.info(
+                "[%s] After key for session %s: %d in-memory + %d persisted sessions still pending",
+                self.name, session_id, remaining, remaining_persisted,
+            )
+
+    def _failed_decryptions_snapshot(self) -> dict[str, list[dict]]:
+        return dict(self._state._failed_decryptions)
 
     # -------------------------------------------------- message handlers
 

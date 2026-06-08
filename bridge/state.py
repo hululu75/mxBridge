@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 MAX_PROCESSED_CACHE = 10000
 MAX_EVENT_MAP = 5000
-MAX_FAILED_DECRYPTIONS = 500
+MAX_FAILED_DECRYPTIONS = 2000
 
 
 class StateManager:
