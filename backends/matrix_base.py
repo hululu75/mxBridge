@@ -616,6 +616,56 @@ class MatrixBackend(BaseBackend):
                 await client.send_to_device_messages()
             except Exception:
                 pass
+        await self._request_keys_from_own_devices()
+
+    async def _request_keys_from_own_devices(self) -> None:
+        client = self._get_client()
+        own_user_id = self.config.get("user_id", "")
+        own_device_id = client.device_id or ""
+
+        own_other_devices = [
+            d.id for d in client.device_store.active_user_devices(own_user_id)
+            if d.id != own_device_id
+        ]
+        if not own_other_devices or not self._pending_encrypted:
+            return
+
+        sent = 0
+        for session_id, entry in self._pending_encrypted.items():
+            events = entry.get("events", [])
+            if not events:
+                continue
+            _, enc_event = events[0]
+
+            request_content = {
+                "action": "request",
+                "body": {
+                    "algorithm": getattr(enc_event, "algorithm", ""),
+                    "room_id": enc_event.room_id,
+                    "sender_key": getattr(enc_event, "sender_key", ""),
+                    "session_id": session_id,
+                },
+                "request_id": f"mxbridge_{session_id[:16]}",
+                "requesting_device_id": own_device_id,
+            }
+
+            for device_id in own_other_devices:
+                try:
+                    await client.to_device(ToDeviceMessage(
+                        type="m.room_key_request",
+                        recipient=own_user_id,
+                        recipient_device=device_id,
+                        content=request_content,
+                    ))
+                    sent += 1
+                except Exception:
+                    pass
+
+        if sent:
+            logger.info(
+                "[%s] Sent key requests to %d own device(s) for %d pending session(s)",
+                self.name, len(own_other_devices), len(self._pending_encrypted),
+            )
 
     async def _enqueue_pending_encrypted(self, room, event, error) -> None:
         session_id = getattr(event, "session_id", None)

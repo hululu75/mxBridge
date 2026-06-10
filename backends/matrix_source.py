@@ -231,6 +231,7 @@ class MatrixSourceBackend(MatrixBackend):
                 pass
         if re_enqueued:
             logger.info("[%s] Re-enqueued %d event(s) into pending queue for periodic key retry", self.name, re_enqueued)
+        await self._request_keys_from_own_devices()
 
     # -------------------------------------------------- periodic key backup
 
