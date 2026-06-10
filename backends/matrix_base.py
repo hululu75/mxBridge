@@ -535,7 +535,7 @@ class MatrixBackend(BaseBackend):
 
     async def stop(self) -> None:
         self._running = False
-        for attr in ("_flush_task", "_key_upload_task", "_sync_task", "_call_cleanup_task", "_token_refresh_task"):
+        for attr in ("_flush_task", "_key_upload_task", "_sync_task", "_call_cleanup_task", "_token_refresh_task", "_key_backup_restore_task"):
             task = getattr(self, attr, None)
             if task:
                 task.cancel()

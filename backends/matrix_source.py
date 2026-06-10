@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 CALL_CLEANUP_INTERVAL = 3600
 CALL_MAX_AGE = 86400
+KEY_BACKUP_RESTORE_INTERVAL = 300
 
 
 class MatrixSourceBackend(MatrixBackend):
@@ -52,6 +53,7 @@ class MatrixSourceBackend(MatrixBackend):
         super().__init__(name, config, state, config_path=config_path)
         self._active_calls: dict[str, dict] = {}
         self._call_cleanup_task: Optional[asyncio.Task] = None
+        self._key_backup_restore_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         saved_token = await self._init_client()
@@ -113,22 +115,7 @@ class MatrixSourceBackend(MatrixBackend):
             n = await self.restore_key_backup()
             if n:
                 logger.log(ALWAYS, "[%s] Key backup restored %d session(s) — retrying failed decryptions", self.name, n)
-                retry_sessions = self._state.get_failed_decryption_sessions()
-                if retry_sessions:
-                    for sid in retry_sessions:
-                        items = self._state.get_failed_decryption_events(sid)
-                        for it in items:
-                            try:
-                                resp = await client.room_get_event(it["room_id"], it["event_id"])
-                                if hasattr(resp, "event"):
-                                    decrypted = await client.decrypt_event(resp.event)
-                                    room = client.rooms.get(it["room_id"])
-                                    if room:
-                                        await self._dispatch_decrypted(room, it["event_id"], decrypted)
-                                        await self._state.pop_failed_decryptions(sid)
-                                        logger.info("[%s] Decrypted persisted event %s after key backup", self.name, it["event_id"])
-                            except Exception:
-                                pass
+                await self._retry_all_pending()
         else:
             encrypted_count = sum(1 for r in client.rooms.values() if r.encrypted)
             if encrypted_count:
@@ -146,6 +133,7 @@ class MatrixSourceBackend(MatrixBackend):
         self._key_upload_task = asyncio.create_task(self._periodic_key_upload())
         self._call_cleanup_task = asyncio.create_task(self._cleanup_stale_calls())
         self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
+        self._key_backup_restore_task = asyncio.create_task(self._periodic_key_backup_restore())
         self._sync_task = asyncio.create_task(self._sync_loop())
 
         encrypted_rooms = sum(1 for r in client.rooms.values() if r.encrypted)
@@ -243,6 +231,72 @@ class MatrixSourceBackend(MatrixBackend):
                 pass
         if re_enqueued:
             logger.info("[%s] Re-enqueued %d event(s) into pending queue for periodic key retry", self.name, re_enqueued)
+
+    # -------------------------------------------------- periodic key backup
+
+    async def _periodic_key_backup_restore(self) -> None:
+        if not self.config.get("recovery_key"):
+            return
+        await asyncio.sleep(KEY_BACKUP_RESTORE_INTERVAL)
+        while self._running:
+            try:
+                n = await self.restore_key_backup()
+                if n:
+                    has_pending = bool(self._pending_encrypted) or bool(self._state.get_failed_decryption_sessions())
+                    if has_pending:
+                        logger.log(ALWAYS, "[%s] Periodic key backup: %d session(s) restored, retrying pending", self.name, n)
+                        await self._retry_all_pending()
+                    else:
+                        logger.info("[%s] Periodic key backup: %d session(s) restored, no pending events", self.name, n)
+            except Exception as e:
+                logger.warning("[%s] Periodic key backup restore failed: %s", self.name, e)
+            await asyncio.sleep(KEY_BACKUP_RESTORE_INTERVAL)
+
+    async def _retry_all_pending(self) -> None:
+        client = self._get_client()
+        total_decrypted = 0
+
+        for sid in list(self._pending_encrypted.keys()):
+            entry = self._pending_encrypted.pop(sid)
+            pending = entry["events"]
+            for _, ev in pending:
+                self._pending_event_ids.discard(ev.event_id)
+            failed = []
+            for room, enc_event in pending:
+                try:
+                    decrypted = await client.decrypt_event(enc_event)
+                    await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
+                    total_decrypted += 1
+                except Exception:
+                    failed.append((room, enc_event))
+            if failed:
+                new_entry = self._pending_encrypted.setdefault(sid, {
+                    "events": [], "first_seen": entry.get("first_seen", time.monotonic()),
+                    "last_requested": entry.get("last_requested", 0.0),
+                })
+                for room, enc_event in failed:
+                    if enc_event.event_id not in self._pending_event_ids:
+                        self._pending_event_ids.add(enc_event.event_id)
+                        new_entry["events"].append((room, enc_event))
+
+        for sid in self._state.get_failed_decryption_sessions():
+            items = await self._state.pop_failed_decryptions(sid)
+            for item in items:
+                try:
+                    resp = await client.room_get_event(item["room_id"], item["event_id"])
+                    if not hasattr(resp, "event"):
+                        continue
+                    decrypted = await client.decrypt_event(resp.event)
+                    room = client.rooms.get(item["room_id"])
+                    if room:
+                        await self._dispatch_decrypted(room, item["event_id"], decrypted)
+                        total_decrypted += 1
+                        logger.info("[%s] Decrypted persisted event %s after key restore", self.name, item["event_id"])
+                except Exception:
+                    await self._state.save_failed_decryption(sid, item["room_id"], item["event_id"])
+
+        if total_decrypted:
+            logger.info("[%s] Retry after key restore: %d event(s) decrypted", self.name, total_decrypted)
 
     async def _cleanup_stale_calls(self) -> None:
         while self._running:
