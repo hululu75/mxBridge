@@ -360,6 +360,10 @@ class MatrixTargetBackend(MatrixBackend):
 
     async def _dispatch_decrypted(self, room, original_event_id: str, decrypted) -> None:
         if not isinstance(decrypted, RoomMessage):
+            logger.info(
+                "[%s] Not forwarding decrypted %s: %s is not a room message",
+                self.name, original_event_id, type(decrypted).__name__,
+            )
             return
         await self._state.mark_processed(original_event_id)
         if isinstance(decrypted, RoomMessageText):

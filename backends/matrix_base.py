@@ -715,11 +715,34 @@ class MatrixBackend(BaseBackend):
             events = entry["events"]
             if not events:
                 continue
-            _, enc_event = events[0]
-            if not isinstance(enc_event, MegolmEvent):
-                # Already decrypted by room_get_event — no key to request; the
-                # next retry pass will dispatch it.
+            # Events room_get_event already decrypted have no key to request.
+            # Dispatch them right here: without a recovery_key there is no
+            # periodic retry pass, so deferring would strand them until the
+            # next restart.
+            still_encrypted = []
+            for room, ev in events:
+                if isinstance(ev, MegolmEvent):
+                    still_encrypted.append((room, ev))
+                    continue
+                try:
+                    await self._dispatch_decrypted(room, ev.event_id, ev)
+                    self._pending_event_ids.discard(ev.event_id)
+                    await self._state.remove_failed_decryption(session_id, ev.event_id)
+                    logger.info(
+                        "[%s] Dispatched already-decrypted pending event %s",
+                        self.name, ev.event_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[%s] Dispatch of already-decrypted %s failed: %s",
+                        self.name, ev.event_id, e,
+                    )
+                    still_encrypted.append((room, ev))
+            entry["events"] = still_encrypted
+            if not still_encrypted:
+                self._pending_encrypted.pop(session_id, None)
                 continue
+            _, enc_event = still_encrypted[0]
             sender = enc_event.sender
             await self._before_key_rerequest(client, enc_event)
             try:

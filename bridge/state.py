@@ -294,6 +294,21 @@ class StateManager:
                             else:
                                 self._failed_decryptions.pop(sid, None)
 
+    async def remove_failed_decryption(self, session_id: str, event_id: str) -> None:
+        events = self._failed_decryptions.get(session_id)
+        if events:
+            remaining = [e for e in events if e["event_id"] != event_id]
+            if remaining:
+                self._failed_decryptions[session_id] = remaining
+            else:
+                self._failed_decryptions.pop(session_id, None)
+        await asyncio.to_thread(
+            lambda: FailedDecryption.delete().where(
+                (FailedDecryption.session_id == session_id)
+                & (FailedDecryption.event_id == event_id)
+            ).execute()
+        )
+
     async def pop_failed_decryptions(self, session_id: str) -> list[dict]:
         items = self._failed_decryptions.pop(session_id, [])
         if items:

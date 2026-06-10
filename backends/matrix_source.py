@@ -264,6 +264,7 @@ class MatrixSourceBackend(MatrixBackend):
     async def _retry_all_pending(self) -> None:
         client = self._get_client()
         total_decrypted = 0
+        handled_ids: set[str] = set()
 
         for sid in list(self._pending_encrypted.keys()):
             entry = self._pending_encrypted.pop(sid)
@@ -276,6 +277,7 @@ class MatrixSourceBackend(MatrixBackend):
                     decrypted = self._decrypt_if_needed(enc_event)
                     await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
                     total_decrypted += 1
+                    handled_ids.add(enc_event.event_id)
                 except Exception as e:
                     if not failed:
                         logger.warning(
@@ -296,6 +298,8 @@ class MatrixSourceBackend(MatrixBackend):
         for sid in self._state.get_failed_decryption_sessions():
             items = await self._state.pop_failed_decryptions(sid)
             for item in items:
+                if item["event_id"] in handled_ids:
+                    continue  # already dispatched via the in-memory queue above
                 try:
                     resp = await client.room_get_event(item["room_id"], item["event_id"])
                     if not hasattr(resp, "event"):
@@ -498,8 +502,12 @@ class MatrixSourceBackend(MatrixBackend):
                         await self._dispatch_decrypted(room, event.event_id, decrypted, from_self=from_self)
                         logger.info("[%s] Decrypted %s via immediate backup restore", self.name, event.event_id)
                         return
-                except Exception:
-                    pass
+                except Exception as restore_err:
+                    logger.warning(
+                        "[%s] Immediate backup restore for %s failed: %s: %s",
+                        self.name, event.event_id,
+                        type(restore_err).__name__, restore_err,
+                    )
 
             await self._enqueue_pending_encrypted(room, event, e)
             return
@@ -765,6 +773,12 @@ class MatrixSourceBackend(MatrixBackend):
 
     async def _dispatch_decrypted(self, room: MatrixRoom, original_event_id: str, decrypted, from_self: bool = False) -> None:
         if not isinstance(decrypted, RoomMessage):
+            # Reactions etc. are expected; BadEvent means the plaintext failed
+            # schema validation — surface it, retrying cannot improve either.
+            logger.info(
+                "[%s] Not forwarding decrypted %s: %s is not a room message",
+                self.name, original_event_id, type(decrypted).__name__,
+            )
             return
         await self._state.mark_processed(original_event_id)
         if isinstance(decrypted, RoomMessageText):
