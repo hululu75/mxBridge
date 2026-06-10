@@ -296,6 +296,14 @@ class MatrixSourceBackend(MatrixBackend):
                         new_entry["events"].append((room, enc_event))
 
         for sid in self._state.get_failed_decryption_sessions():
+            preview = self._state.get_failed_decryption_events(sid)
+            if not preview:
+                continue
+            # Without the session key in the store every fetch is a guaranteed
+            # failure — leave the records persisted and skip the HTTP round
+            # trips until the key actually arrives.
+            if not self._have_session_key(preview[0]["room_id"], sid):
+                continue
             items = await self._state.pop_failed_decryptions(sid)
             for item in items:
                 if item["event_id"] in handled_ids:

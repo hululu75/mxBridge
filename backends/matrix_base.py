@@ -84,6 +84,7 @@ class MatrixBackend(BaseBackend):
         self._room_name_order: collections.deque[str] = collections.deque()
         self._backup_priv_bytes: Optional[bytes] = None
         self._backup_version: Optional[str] = None
+        self._backup_last_etag: str = ""
 
     # ------------------------------------------------------------------ client
 
@@ -397,6 +398,23 @@ class MatrixBackend(BaseBackend):
             return self._get_client().decrypt_event(event)
         return event
 
+    def _have_session_key(self, room_id: str, session_id: str) -> bool:
+        """Whether the megolm session is in the local crypto store.
+
+        Cheap local lookup used to skip per-event HTTP fetches for sessions
+        whose keys have not arrived yet.
+        """
+        olm = getattr(self._get_client(), "olm", None)
+        if olm is None:
+            return False
+        try:
+            for sessions in olm.inbound_group_store[room_id].values():
+                if session_id in sessions:
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _local_identity_keys(self) -> dict:
         """The bridge's own olm identity keys, or {} if crypto isn't loaded."""
         client = self._get_client()
@@ -568,12 +586,41 @@ class MatrixBackend(BaseBackend):
             logger.error("[%s] Failed to import key file: %s", self.name, e)
             return False
 
+    async def _fetch_backup_etag(self) -> str:
+        """Return the server backup's etag ('' if unavailable).
+
+        The etag in /room_keys/version changes whenever keys are added to the
+        backup, so an unchanged etag means a full restore would import nothing
+        new.
+        """
+        try:
+            import aiohttp
+            client = self._get_client()
+            hs = self.config["homeserver"].rstrip("/")
+            async with aiohttp.ClientSession() as http:
+                async with http.get(
+                    f"{hs}/_matrix/client/v3/room_keys/version",
+                    headers={"Authorization": f"Bearer {client.access_token}"},
+                ) as r:
+                    if r.status != 200:
+                        return ""
+                    data = await r.json()
+            return str(data.get("etag", ""))
+        except Exception:
+            return ""
+
     async def restore_key_backup(self) -> int:
         """Fetch megolm sessions from server key backup using the configured recovery_key."""
         recovery_key = self.config.get("recovery_key", "")
         if not recovery_key:
             logger.info("[%s] No recovery_key configured, skipping key backup restore", self.name)
             return 0
+
+        etag = await self._fetch_backup_etag()
+        if etag and etag == self._backup_last_etag:
+            logger.debug("[%s] Key backup unchanged (etag=%s), skipping restore", self.name, etag)
+            return 0
+
         from bridge.key_backup import restore_key_backup
         client = self._get_client()
         try:
@@ -585,6 +632,8 @@ class MatrixBackend(BaseBackend):
             )
             if n:
                 logger.log(ALWAYS, "[%s] Key backup restored: %d sessions imported", self.name, n)
+                if etag:
+                    self._backup_last_etag = etag
             return n
         except Exception as e:
             logger.error("[%s] Key backup restore failed: %s", self.name, e)
