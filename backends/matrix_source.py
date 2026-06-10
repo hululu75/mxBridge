@@ -276,7 +276,12 @@ class MatrixSourceBackend(MatrixBackend):
                     decrypted = client.decrypt_event(enc_event)
                     await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
                     total_decrypted += 1
-                except Exception:
+                except Exception as e:
+                    if not failed:
+                        logger.warning(
+                            "[%s] Retry failed for %s (session %s): %s: %s",
+                            self.name, enc_event.event_id, sid[:16], type(e).__name__, e,
+                        )
                     failed.append((room, enc_event))
             if failed:
                 new_entry = self._pending_encrypted.setdefault(sid, {
@@ -301,11 +306,19 @@ class MatrixSourceBackend(MatrixBackend):
                         await self._dispatch_decrypted(room, item["event_id"], decrypted)
                         total_decrypted += 1
                         logger.info("[%s] Decrypted persisted event %s after key restore", self.name, item["event_id"])
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        "[%s] Persisted retry failed for %s (session %s): %s: %s",
+                        self.name, item["event_id"], sid[:16], type(e).__name__, e,
+                    )
                     await self._state.save_failed_decryption(sid, item["room_id"], item["event_id"])
 
-        if total_decrypted:
-            logger.info("[%s] Retry after key restore: %d event(s) decrypted", self.name, total_decrypted)
+        still_pending = len(self._pending_encrypted) + len(self._state.get_failed_decryption_sessions())
+        logger.log(
+            ALWAYS,
+            "[%s] Retry pass done: %d event(s) decrypted, %d session(s) still pending",
+            self.name, total_decrypted, still_pending,
+        )
 
     async def _cleanup_stale_calls(self) -> None:
         while self._running:
