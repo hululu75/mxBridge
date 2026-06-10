@@ -384,11 +384,17 @@ class MatrixBackend(BaseBackend):
         except Exception as e:
             logger.error("[%s] Failed to persist config: %s", self.name, e)
 
+    def _local_identity_keys(self) -> dict:
+        """The bridge's own olm identity keys, or {} if crypto isn't loaded."""
+        client = self._get_client()
+        olm = getattr(client, "olm", None)
+        if olm is None or getattr(olm, "account", None) is None:
+            return {}
+        return dict(olm.account.identity_keys)
+
     async def _check_identity_key_consistency(self) -> None:
         client = self._get_client()
-        local_curve = ""
-        if hasattr(client, "olm_account_identity_keys"):
-            local_curve = client.olm_account_identity_keys.get("curve25519", "")
+        local_curve = self._local_identity_keys().get("curve25519", "")
         if not local_curve or not client.device_id:
             return
         try:
@@ -413,9 +419,16 @@ class MatrixBackend(BaseBackend):
                 return
             if server_curve != local_curve:
                 logger.error(
-                    "[%s] IDENTITY KEY MISMATCH! local=%s server=%s — "
-                    "delete the store/ directory and restart to fix.",
-                    self.name, local_curve[:16] + "...", server_curve[:16] + "...",
+                    "[%s] IDENTITY KEY MISMATCH for device %s! local=%s server=%s — "
+                    "the server advertises keys this bridge does not own (usually an "
+                    "Element Web SSO login uploaded its own keys for this device_id). "
+                    "Senders encrypt room keys to the server's key, so NOTHING can be "
+                    "decrypted. Fix: sign out this session in Element (deleting the "
+                    "device server-side), delete the local store/ directory, clear "
+                    "device_id/access_token in config, and restart to create a fresh "
+                    "device. Deleting only the store/ directory will NOT fix it.",
+                    self.name, client.device_id,
+                    local_curve[:16] + "...", server_curve[:16] + "...",
                 )
             else:
                 logger.info("[%s] Identity key verified OK (curve25519=%s...)", self.name, local_curve[:16])

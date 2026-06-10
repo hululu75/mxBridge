@@ -398,6 +398,27 @@ async def _do_sso_flow(
     await page.route("**/oauth2/token", route_handler)
     await page.route("**/oauth/token", route_handler)
 
+    # The headless Element session must NEVER register a crypto identity for
+    # the device: the bridge's own olm account (matrix-nio) uploads the device
+    # keys after login. If Element Web wins this race, the server permanently
+    # advertises the browser's curve25519/ed25519 keys, every sender encrypts
+    # room keys to a key the bridge doesn't have, and no message can ever be
+    # decrypted ("Olm event doesn't contain ciphertext for our key").
+    async def block_crypto_upload(route):
+        logger.info(
+            "[sso] Blocked browser crypto upload: %s %s",
+            route.request.method, route.request.url[:100],
+        )
+        await route.abort()
+
+    for pattern in (
+        "**/_matrix/client/*/keys/upload*",
+        "**/_matrix/client/*/keys/device_signing/upload*",
+        "**/_matrix/client/*/keys/signatures/upload*",
+        "**/_matrix/client/*/dehydrated_device*",
+    ):
+        await page.route(pattern, block_crypto_upload)
+
     login_url = element_url.rstrip("/") + "/#/login"
     logger.info("[sso] Opening %s ...", login_url)
     await page.goto(login_url, wait_until="networkidle")

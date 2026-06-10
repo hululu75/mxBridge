@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import yaml
 
-from bridge.crypto import decrypt_config
+from bridge.crypto import decrypt, is_encrypted
 from bridge.key_backup import derive_backup_key, _decrypt_backup_session
 
 
@@ -106,6 +106,75 @@ def export_first_known_index(session_key_b64: str) -> Optional[int]:
     return struct.unpack(">I", raw[1:5])[0]
 
 
+def load_local_identity_keys(section: dict) -> Optional[dict]:
+    """Read the bridge's olm account identity keys straight from the nio store."""
+    import glob
+    import sqlite3
+
+    import olm
+
+    store_path = section.get("store_path", "")
+    device_id = section.get("device_id", "")
+    if not store_path or not os.path.isdir(store_path):
+        return None
+    for db_path in glob.glob(os.path.join(store_path, "*.db")) + \
+            glob.glob(os.path.join(store_path, "*.DB")):
+        try:
+            db = sqlite3.connect(db_path)
+            row = db.execute(
+                "SELECT account FROM accounts WHERE device_id = ?", (device_id,)
+            ).fetchone()
+            db.close()
+        except sqlite3.Error:
+            continue
+        if row:
+            pickle_b = row[0] if isinstance(row[0], bytes) else row[0].encode()
+            return dict(olm.Account.from_pickle(pickle_b, "DEFAULT_KEY").identity_keys)
+    return None
+
+
+async def check_identity(http, hs: str, headers: dict, section: dict) -> bool:
+    """Compare local olm identity keys with what the server advertises.
+
+    Returns False on a mismatch — the fatal condition where senders encrypt
+    room keys to a key the bridge does not own.
+    """
+    user_id = section["user_id"]
+    device_id = section.get("device_id", "")
+    local = load_local_identity_keys(section)
+    if not local:
+        print(f"identity check: cannot read local olm account for device {device_id} "
+              f"(store_path={section.get('store_path', '')!r}) — skipped")
+        return True
+    async with http.post(
+        f"{hs}/_matrix/client/v3/keys/query", headers=headers,
+        json={"device_keys": {user_id: [device_id]}},
+    ) as r:
+        if r.status != 200:
+            print(f"identity check: keys/query HTTP {r.status} — skipped")
+            return True
+        data = await r.json()
+    server_keys = (data.get("device_keys", {}).get(user_id, {})
+                   .get(device_id, {}).get("keys", {}))
+    server_curve = server_keys.get(f"curve25519:{device_id}", "")
+    server_ed = server_keys.get(f"ed25519:{device_id}", "")
+    print(f"identity check for device {device_id}:")
+    print(f"  local  curve25519={local.get('curve25519')}  ed25519={local.get('ed25519')}")
+    print(f"  server curve25519={server_curve or '(none)'}  ed25519={server_ed or '(none)'}")
+    if not server_curve:
+        print("  -> server has NO keys for this device (bridge keys_upload may have failed)")
+        return False
+    if server_curve != local.get("curve25519") or server_ed != local.get("ed25519"):
+        print("  -> FATAL MISMATCH: the server advertises keys this bridge does not own.")
+        print("     Senders encrypt room keys to the server's key; the bridge can never")
+        print("     decrypt them ('Olm event doesn't contain ciphertext for our key').")
+        print("     Fix: sign out this session in Element, delete the local store/,")
+        print("     clear device_id/access_token in config, restart for a fresh device.")
+        return False
+    print("  -> identity keys consistent")
+    return True
+
+
 async def fetch_events(http, hs: str, headers: dict, room_id: str,
                        event_id: Optional[str], limit: int) -> list[dict]:
     enc_room = quote(room_id, safe="")
@@ -137,9 +206,19 @@ async def main() -> None:
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
-    master = os.environ.get("MXBRIDGE_MASTER_KEY") or getpass.getpass("Master password: ")
-    config = decrypt_config(config, master)
     section = config[args.section]
+    # Decrypt only the fields of the chosen section; no password prompt if none
+    # of them are encrypted.
+    enc_fields = [f for f in ("access_token", "recovery_key")
+                  if is_encrypted(section.get(f, ""))]
+    if enc_fields:
+        master = os.environ.get("MXBRIDGE_MASTER_KEY") or getpass.getpass("Master password: ")
+        for field in enc_fields:
+            plain = decrypt(section[field], master)
+            if plain is None:
+                print(f"ERROR: cannot decrypt {args.section}.{field} — wrong master password?")
+                return
+            section[field] = plain
 
     hs = section["homeserver"].rstrip("/")
     token = section["access_token"]
@@ -156,6 +235,10 @@ async def main() -> None:
                 return
             who = await r.json()
             print(f"Authenticated as {who.get('user_id')} device={who.get('device_id')}")
+
+        identity_ok = await check_identity(http, hs, headers, section)
+        if not identity_ok:
+            print("\nIdentity is broken — per-event backup checks below are secondary.\n")
 
         backup_priv = None
         version = ""

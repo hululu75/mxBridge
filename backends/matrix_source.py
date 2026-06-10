@@ -65,8 +65,9 @@ class MatrixSourceBackend(MatrixBackend):
             logger.info("[%s] Resumed from sync token", self.name)
 
         own_device_id = client.device_id or ""
-        own_ed25519 = client.olm_account_identity_keys.get("ed25519", "?") if hasattr(client, "olm_account_identity_keys") else "?"
-        own_curve25519 = client.olm_account_identity_keys.get("curve25519", "?") if hasattr(client, "olm_account_identity_keys") else "?"
+        identity_keys = self._local_identity_keys()
+        own_ed25519 = identity_keys.get("ed25519", "?")
+        own_curve25519 = identity_keys.get("curve25519", "?")
         logger.log(ALWAYS,
             "[%s] Bridge device: id=%s ed25519=%s curve25519=%s",
             self.name, own_device_id, own_ed25519[:16] + "...", own_curve25519[:16] + "...",
@@ -139,7 +140,9 @@ class MatrixSourceBackend(MatrixBackend):
         encrypted_rooms = sum(1 for r in client.rooms.values() if r.encrypted)
         megolm_sessions = 0
         try:
-            megolm_sessions = len(client.olm_account_session_cache) if hasattr(client, "olm_account_session_cache") else 0
+            olm = getattr(client, "olm", None)
+            if olm is not None:
+                megolm_sessions = sum(1 for _ in olm.inbound_group_store)
         except Exception:
             pass
         logger.log(
