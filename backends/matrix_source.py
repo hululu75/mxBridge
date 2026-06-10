@@ -129,6 +129,11 @@ class MatrixSourceBackend(MatrixBackend):
 
         await self._ensure_olm_sessions()
 
+        # Keys may already sit in the crypto store (forwarded by other devices
+        # before a restart) — retry the backlog once even without a backup
+        # restore to trigger it.
+        await self._retry_all_pending()
+
         self._running = True
         self._flush_task = asyncio.create_task(self._periodic_flush())
         self._key_upload_task = asyncio.create_task(self._periodic_key_upload())
