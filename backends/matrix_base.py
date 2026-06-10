@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
 import getpass
 import logging
 import os
 import stat
+import tempfile
 import time
 from io import BytesIO
 from typing import Optional
@@ -79,6 +81,8 @@ class MatrixBackend(BaseBackend):
         self._room_name_cache: dict[str, str] = {}
         self._displayname_order: collections.deque[str] = collections.deque()
         self._room_name_order: collections.deque[str] = collections.deque()
+        self._backup_priv_bytes: Optional[bytes] = None
+        self._backup_version: Optional[str] = None
 
     # ------------------------------------------------------------------ client
 
@@ -337,10 +341,12 @@ class MatrixBackend(BaseBackend):
         # homeserver omits one_time_key_counts from the sync response.
         try:
             await self._client.keys_upload()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[%s] Key upload failed: %s", self.name, e)
         if self._client.should_query_keys:
             await self._client.keys_query()
+
+        await self._check_identity_key_consistency()
 
         await self._import_keys_if_configured()
         saved_token = self._state.load_sync_token(self.name)
@@ -377,6 +383,100 @@ class MatrixBackend(BaseBackend):
             logger.info("[%s] device_id + access_token saved to %s", self.name, self._config_path)
         except Exception as e:
             logger.error("[%s] Failed to persist config: %s", self.name, e)
+
+    async def _check_identity_key_consistency(self) -> None:
+        client = self._get_client()
+        local_curve = ""
+        if hasattr(client, "olm_account_identity_keys"):
+            local_curve = client.olm_account_identity_keys.get("curve25519", "")
+        if not local_curve or not client.device_id:
+            return
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.config['homeserver']}/_matrix/client/v3/keys/query",
+                    headers={"Authorization": f"Bearer {client.access_token}"},
+                    json={"device_keys": {client.user_id: [client.device_id]}},
+                ) as r:
+                    if r.status != 200:
+                        return
+                    data = await r.json()
+            server_curve = (
+                data.get("device_keys", {})
+                .get(client.user_id, {})
+                .get(client.device_id, {})
+                .get("keys", {})
+                .get(f"curve25519:{client.device_id}", "")
+            )
+            if not server_curve:
+                return
+            if server_curve != local_curve:
+                logger.error(
+                    "[%s] IDENTITY KEY MISMATCH! local=%s server=%s — "
+                    "delete the store/ directory and restart to fix.",
+                    self.name, local_curve[:16] + "...", server_curve[:16] + "...",
+                )
+            else:
+                logger.info("[%s] Identity key verified OK (curve25519=%s...)", self.name, local_curve[:16])
+        except Exception:
+            pass
+
+    async def _ensure_backup_key(self) -> bool:
+        if self._backup_priv_bytes:
+            return True
+        recovery_key = self.config.get("recovery_key", "")
+        if not recovery_key:
+            return False
+        try:
+            from bridge.key_backup import derive_backup_key
+            priv, version = await derive_backup_key(
+                homeserver=self.config["homeserver"],
+                access_token=self._get_client().access_token,
+                user_id=self.config["user_id"],
+                recovery_key=recovery_key,
+            )
+            self._backup_priv_bytes = priv
+            self._backup_version = version
+            logger.info("[%s] Backup key derived and cached (version=%s)", self.name, version)
+            return True
+        except Exception as e:
+            logger.debug("[%s] Failed to derive backup key: %s", self.name, e)
+            return False
+
+    async def restore_session_from_backup(self, room_id: str, session_id: str) -> bool:
+        if not await self._ensure_backup_key():
+            return False
+        try:
+            from bridge.key_backup import fetch_session_from_backup, _create_key_export_data
+            session = await fetch_session_from_backup(
+                homeserver=self.config["homeserver"],
+                access_token=self._get_client().access_token,
+                backup_priv=self._backup_priv_bytes,
+                room_id=room_id,
+                session_id=session_id,
+                version=self._backup_version,
+            )
+            if not session:
+                return False
+            client = self._get_client()
+            tmp_pass = base64.b64encode(os.urandom(24)).decode()
+            export_str = _create_key_export_data([session], tmp_pass)
+            fd, tmp_path = tempfile.mkstemp(suffix=".txt")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(export_str)
+                await client.import_keys(tmp_path, tmp_pass)
+                logger.info("[%s] Imported session %s... from backup", self.name, session_id[:16])
+                return True
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.debug("[%s] Failed to restore session %s from backup: %s", self.name, session_id[:16], e)
+            return False
 
     async def _import_keys_if_configured(self) -> None:
         key_file = self.config.get("key_import_file", "")

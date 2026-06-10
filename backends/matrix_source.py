@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 CALL_CLEANUP_INTERVAL = 3600
 CALL_MAX_AGE = 86400
-KEY_BACKUP_RESTORE_INTERVAL = 300
+KEY_BACKUP_RESTORE_INTERVAL = 60
 
 
 class MatrixSourceBackend(MatrixBackend):
@@ -468,6 +468,18 @@ class MatrixSourceBackend(MatrixBackend):
                 from_self=from_self,
             )
             await self._emit_message(placeholder)
+
+            session_id = getattr(event, "session_id", None)
+            if session_id and self.config.get("recovery_key"):
+                try:
+                    if await self.restore_session_from_backup(room.room_id, session_id):
+                        decrypted = await self._get_client().decrypt_event(event)
+                        await self._dispatch_decrypted(room, event.event_id, decrypted, from_self=from_self)
+                        logger.info("[%s] Decrypted %s via immediate backup restore", self.name, event.event_id)
+                        return
+                except Exception:
+                    pass
+
             await self._enqueue_pending_encrypted(room, event, e)
             return
 

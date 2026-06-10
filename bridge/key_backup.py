@@ -23,6 +23,7 @@ import os
 import struct
 import tempfile
 from typing import Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,132 @@ def _create_key_export_data(sessions: list, passphrase: str) -> str:
         + lines + "\n"
         + "-----END MEGOLM SESSION DATA-----\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cached key derivation + single-session fetch
+# ---------------------------------------------------------------------------
+
+async def derive_backup_key(
+    homeserver: str,
+    access_token: str,
+    user_id: str,
+    recovery_key: str,
+) -> tuple[bytes, str]:
+    """Derive the Curve25519 backup private key and get backup version.
+
+    Returns ``(backup_private_key_32bytes, backup_version_string)``.
+    """
+    import aiohttp
+
+    hs = homeserver.rstrip("/")
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with aiohttp.ClientSession() as http:
+        async with http.get(
+            f"{hs}/_matrix/client/v3/user/{user_id}/account_data/m.secret_storage.default_key",
+            headers=headers,
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"No SSSS default key (HTTP {r.status})")
+            key_id = (await r.json()).get("key", "")
+        if not key_id:
+            raise RuntimeError("No key_id in SSSS default key")
+
+        async with http.get(
+            f"{hs}/_matrix/client/v3/user/{user_id}/account_data/m.secret_storage.key.{key_id}",
+            headers=headers,
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"Cannot get SSSS key metadata (HTTP {r.status})")
+            key_metadata = await r.json()
+
+        passphrase_info = key_metadata.get("passphrase")
+        if passphrase_info:
+            ssss_key = _derive_ssss_key_from_passphrase(recovery_key, passphrase_info)
+        else:
+            ssss_key = _decode_recovery_key(recovery_key)
+
+        async with http.get(
+            f"{hs}/_matrix/client/v3/user/{user_id}/account_data/m.megolm_backup.v1",
+            headers=headers,
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"No m.megolm_backup.v1 (HTTP {r.status})")
+            backup_ad = await r.json()
+
+        enc_for_key = backup_ad.get("encrypted", {}).get(key_id)
+        if not enc_for_key:
+            raise RuntimeError(f"Backup key not encrypted for SSSS key {key_id}")
+
+        raw = _ssss_decrypt(ssss_key, "m.megolm_backup.v1", enc_for_key)
+        raw_str = raw.decode("utf-8").strip()
+        try:
+            obj = json.loads(raw_str)
+            b64_str = obj["key"] if isinstance(obj, dict) else raw_str
+        except (json.JSONDecodeError, KeyError):
+            b64_str = raw_str
+        b64_str += "=" * (-len(b64_str) % 4)
+        backup_priv = base64.b64decode(b64_str)
+        if len(backup_priv) != 32:
+            raise RuntimeError(f"Unexpected backup key length {len(backup_priv)}")
+
+        async with http.get(
+            f"{hs}/_matrix/client/v3/room_keys/version", headers=headers
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"Cannot get backup version (HTTP {r.status})")
+            vdata = await r.json()
+        version = vdata.get("version", "")
+        algo = vdata.get("algorithm", "")
+        if algo != "m.megolm_backup.v1.curve25519-aes-sha2":
+            raise RuntimeError(f"Unsupported backup algorithm: {algo}")
+
+    return backup_priv, version
+
+
+async def fetch_session_from_backup(
+    homeserver: str,
+    access_token: str,
+    backup_priv: bytes,
+    room_id: str,
+    session_id: str,
+    version: str,
+) -> Optional[dict]:
+    """Fetch and decrypt a single megolm session from server key backup.
+
+    Returns the session dict suitable for import, or ``None``.
+    """
+    import aiohttp
+
+    hs = homeserver.rstrip("/")
+    headers = {"Authorization": f"Bearer {access_token}"}
+    enc_room = quote(room_id, safe="")
+    enc_session = quote(session_id, safe="")
+
+    async with aiohttp.ClientSession() as http:
+        async with http.get(
+            f"{hs}/_matrix/client/v3/room_keys/keys/{enc_room}/{enc_session}?version={version}",
+            headers=headers,
+        ) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+
+    session_data = data.get("session_data", {})
+    dec = _decrypt_backup_session(backup_priv, session_data)
+    if dec is None:
+        return None
+
+    return {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "forwarding_curve25519_key_chain": dec.get("forwarding_curve25519_key_chain", []),
+        "room_id": room_id,
+        "sender_claimed_ed25519_key": dec.get("sender_claimed_keys", {}).get("ed25519", ""),
+        "sender_key": dec.get("sender_key", ""),
+        "session_id": session_id,
+        "session_key": dec.get("session_key", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
