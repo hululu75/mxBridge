@@ -472,7 +472,7 @@ async def backfill_room(
 
             if isinstance(event, MegolmEvent):
                 try:
-                    event = await client.decrypt_event(event)
+                    event = client.decrypt_event(event)
                     decrypted_ok += 1
                 except Exception as e:
                     decrypted_fail += 1
