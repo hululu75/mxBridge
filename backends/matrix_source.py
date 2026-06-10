@@ -273,7 +273,7 @@ class MatrixSourceBackend(MatrixBackend):
             failed = []
             for room, enc_event in pending:
                 try:
-                    decrypted = client.decrypt_event(enc_event)
+                    decrypted = self._decrypt_if_needed(enc_event)
                     await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
                     total_decrypted += 1
                 except Exception as e:
@@ -300,7 +300,7 @@ class MatrixSourceBackend(MatrixBackend):
                     resp = await client.room_get_event(item["room_id"], item["event_id"])
                     if not hasattr(resp, "event"):
                         continue
-                    decrypted = client.decrypt_event(resp.event)
+                    decrypted = self._decrypt_if_needed(resp.event)
                     room = client.rooms.get(item["room_id"])
                     if room:
                         await self._dispatch_decrypted(room, item["event_id"], decrypted)
@@ -595,7 +595,7 @@ class MatrixSourceBackend(MatrixBackend):
             failed: list[tuple] = []
             for room, enc_event in pending:
                 try:
-                    decrypted = client.decrypt_event(enc_event)
+                    decrypted = self._decrypt_if_needed(enc_event)
                     await self._dispatch_decrypted(room, enc_event.event_id, decrypted)
                     handled_ids.add(enc_event.event_id)
                 except Exception as e:
@@ -625,7 +625,7 @@ class MatrixSourceBackend(MatrixBackend):
                 resp = await client.room_get_event(item["room_id"], item["event_id"])
                 if not hasattr(resp, "event"):
                     continue
-                decrypted = client.decrypt_event(resp.event)
+                decrypted = self._decrypt_if_needed(resp.event)
                 room = client.rooms.get(item["room_id"])
                 if room:
                     await self._dispatch_decrypted(room, item["event_id"], decrypted)

@@ -24,6 +24,7 @@ from nio import (
     KeyVerificationKey,
     KeyVerificationMac,
     KeyVerificationStart,
+    MegolmEvent,
     RoomEncryptedMedia,
     RoomKeyEvent,
     RoomMessageMedia,
@@ -384,6 +385,18 @@ class MatrixBackend(BaseBackend):
         except Exception as e:
             logger.error("[%s] Failed to persist config: %s", self.name, e)
 
+    def _decrypt_if_needed(self, event):
+        """Decrypt an event unless nio already did.
+
+        room_get_event auto-decrypts m.room.encrypted events when the session
+        key is in the store (receive_response replaces response.event with the
+        plaintext event), so events fetched that way may already be decrypted —
+        calling decrypt_event on those raises ValueError.
+        """
+        if isinstance(event, MegolmEvent):
+            return self._get_client().decrypt_event(event)
+        return event
+
     def _local_identity_keys(self) -> dict:
         """The bridge's own olm identity keys, or {} if crypto isn't loaded."""
         client = self._get_client()
@@ -703,6 +716,10 @@ class MatrixBackend(BaseBackend):
             if not events:
                 continue
             _, enc_event = events[0]
+            if not isinstance(enc_event, MegolmEvent):
+                # Already decrypted by room_get_event — no key to request; the
+                # next retry pass will dispatch it.
+                continue
             sender = enc_event.sender
             await self._before_key_rerequest(client, enc_event)
             try:
