@@ -731,10 +731,62 @@ class MatrixBackend(BaseBackend):
                 pass
         await self._request_keys_from_own_devices()
 
+    def _trust_own_devices(self) -> None:
+        """Locally mark our own account's other devices as verified.
+
+        nio drops m.forwarded_room_key from any device not flagged verified in
+        its store (_should_accept_forward), so without this the key responses
+        our own Element sessions send back are silently discarded with
+        "Received a forwarded room key from a untrusted device".
+        """
+        client = self._get_client()
+        own_user_id = self.config.get("user_id", "")
+        trusted = 0
+        for device in client.device_store.active_user_devices(own_user_id):
+            if device.id == client.device_id or device.verified:
+                continue
+            try:
+                if client.verify_device(device):
+                    trusted += 1
+            except Exception:
+                pass
+        if trusted:
+            logger.info(
+                "[%s] Locally trusted %d own device(s) so their key forwards are accepted",
+                self.name, trusted,
+            )
+
+    def _register_key_request(self, session_id: str, enc_event, request_id: str) -> None:
+        """Record an outgoing key request in nio's store.
+
+        nio only accepts a forwarded room key if its session_id appears in
+        olm.outgoing_key_requests; requests sent as raw to-device messages
+        bypass that registry, so the answer would be ignored with
+        "Ignoring session key we have not requested".
+        """
+        client = self._get_client()
+        olm = getattr(client, "olm", None)
+        if olm is None or session_id in olm.outgoing_key_requests:
+            return
+        try:
+            from nio.crypto import OutgoingKeyRequest
+            req = OutgoingKeyRequest(
+                request_id=request_id,
+                session_id=session_id,
+                room_id=enc_event.room_id,
+                algorithm=getattr(enc_event, "algorithm", "m.megolm.v1.aes-sha2"),
+            )
+            olm.outgoing_key_requests[session_id] = req
+            client.store.add_outgoing_key_request(req)
+        except Exception as e:
+            logger.debug("[%s] Could not register key request for %s: %s", self.name, session_id, e)
+
     async def _request_keys_from_own_devices(self) -> None:
         client = self._get_client()
         own_user_id = self.config.get("user_id", "")
         own_device_id = client.device_id or ""
+
+        self._trust_own_devices()
 
         own_other_devices = [
             d.id for d in client.device_store.active_user_devices(own_user_id)
@@ -749,6 +801,8 @@ class MatrixBackend(BaseBackend):
             if not events:
                 continue
             _, enc_event = events[0]
+
+            self._register_key_request(session_id, enc_event, f"mxbridge_{session_id[:16]}")
 
             request_content = {
                 "action": "request",
