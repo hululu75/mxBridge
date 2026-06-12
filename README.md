@@ -176,10 +176,14 @@ Or use your Matrix client's reply feature directly on a forwarded message.
 python3 scripts/backfill.py
 
 # Import specific rooms, last 7 days
-python3 scripts/backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
+python3 scripts/backfill.py --rooms "#general:a.com" "!abc:a.com" --days 7
 
 # Repair corrupted media files
 python3 scripts/repair_media.py
+
+# Diagnose E2EE decryption issues
+MXBRIDGE_MASTER_KEY=... python scripts/diagnose_decrypt.py \
+    --config config.yaml --room '!roomid:server'
 
 # Encrypt/decrypt config values
 python3 scripts/encrypt_tool.py encrypt

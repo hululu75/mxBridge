@@ -192,6 +192,9 @@ python3 main.py
 | `source.media_max_size` | No | Max media file size in bytes (default: 50 MB) |
 | `source.key_import_file` | No | Path to E2EE key export file (e.g., from Element) |
 | `source.key_import_passphrase` | No | Passphrase for the key export file |
+| `source.element_url` | No | Element web URL for SSO login (e.g., `https://element.example.com`) |
+| `source.sso_username` | No | SSO/Keycloak username (for SSO login) |
+| `source.recovery_key` | No | Element recovery key for device verification and key backup restore |
 | `target.homeserver` | Yes** | Base URL of Server B |
 | `target.user_id` | Yes** | Full user ID of the bridge account on B |
 | `target.access_token` | Yes** | Access token for Server B |
@@ -382,10 +385,9 @@ Set `trusted_proxy: true` in the web config to read the real client IP from `X-F
 ```bash
 # Import last 30 days from all rooms
 python3 scripts/backfill.py
-```
 
 # Import specific rooms, last 7 days
-python3 scripts/backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
+python3 scripts/backfill.py --rooms "#general:a.com" "!abc:a.com" --days 7
 
 # Dry run (show what would be imported)
 python3 scripts/backfill.py --dry-run
@@ -402,7 +404,6 @@ python3 scripts/backfill.py --limit 1000
 ```bash
 # Check and repair corrupted media files
 python3 scripts/repair_media.py
-```
 
 # Dry run (show what would be repaired)
 python3 scripts/repair_media.py --dry-run
@@ -413,6 +414,18 @@ python3 scripts/repair_media.py --dry-run
 ```bash
 python3 scripts/encrypt_tool.py encrypt    # Encrypt a value
 python3 scripts/encrypt_tool.py decrypt    # Decrypt a value
+```
+
+### Diagnose decrypt — troubleshoot E2EE decryption
+
+```bash
+# Diagnose why encrypted events in a room cannot be decrypted
+MXBRIDGE_MASTER_KEY=... python scripts/diagnose_decrypt.py \
+    --config config.yaml --room '!roomid:server' [--limit 50]
+
+# Diagnose a specific event
+MXBRIDGE_MASTER_KEY=... python scripts/diagnose_decrypt.py \
+    --config config.yaml --room '!roomid:server' --event '$eventid'
 ```
 
 ## Key import
@@ -466,8 +479,7 @@ logging:
 
 ### Duplicate messages after restart
 
-- State is now persisted in the SQLite database (previously `state.json`). If the database is deleted, the bridge will re-process old messages.
-- On first run after upgrade, `state.json` is automatically migrated to the database and deleted.
+- State is now persisted in the SQLite database. If the database is deleted, the bridge will re-process old messages.
 
 ### Database migration from plaintext to encrypted
 

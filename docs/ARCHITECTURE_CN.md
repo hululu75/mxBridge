@@ -21,10 +21,10 @@
                                        │
                         ┌──────────────┼──────────────┐
                         │              │              │
-                 ┌──────┴──────┐ ┌─────┴──────┐ ┌─────┴──────┐
-                 │  状态存储    │ │ 消息存储     │ │  Web 服务   │
-                 │ state.json  │ │ SQLite DB   │ │ (aiohttp)  │
-                 └─────────────┘ └────────────┘ └────────────┘
+                  ┌──────┴──────┐ ┌─────┴──────┐ ┌─────┴──────┐
+                  │  状态存储    │ │ 消息存储     │ │  Web 服务   │
+                  │ SQLite DB   │ │ SQLite DB   │ │ (aiohttp)  │
+                  └─────────────┘ └────────────┘ └────────────┘
 ```
 
 ### 备份模式（无目标服务器）
@@ -58,7 +58,7 @@
 ## 2. 项目结构
 
 ```
-matrix/
+mxBridge/
 ├── main.py                       # 入口：配置加载、加密、信号处理、启动
 ├── config.example.yaml           # 配置模板
 ├── requirements.txt              # Python 依赖
@@ -73,7 +73,9 @@ matrix/
 ├── scripts/
 │   ├── backfill.py               # CLI：导入历史消息到 MessageStore
 │   ├── repair_media.py           # CLI：修复损坏的加密媒体文件
-│   └── encrypt_tool.py           # CLI：加密/解密配置值
+│   ├── encrypt_tool.py           # CLI：加密/解密配置值
+│   └── diagnose_decrypt.py       # CLI：诊断 E2EE 解密问题
+├── tests/                        # 测试套件
 ├── bridge/
 │   ├── __init__.py
 │   ├── models.py                 # BridgeMessage 数据类 — 统一的跨后端消息模型
@@ -82,6 +84,7 @@ matrix/
 │   ├── message_store.py          # MessageStore — SQLCipher 加密的 SQLite（含 FTS5 + 状态表）
 │   ├── web.py                    # WebServer — aiohttp HTTP API，用于消息搜索和浏览
 │   ├── crypto.py                 # 配置字段加密/解密（Fernet + PBKDF2）+ 数据库密钥派生
+│   ├── key_backup.py             # 服务器端密钥备份恢复（基于 recovery_key）
 │   └── templates/
 │       ├── index.html            # Web UI 单页应用
 │       └── marked.min.js         # Markdown 渲染库
@@ -90,7 +93,8 @@ matrix/
 │   ├── base.py                   # BaseBackend — 所有协议适配器的抽象接口
 │   ├── matrix_base.py            # MatrixBackend — 共享的 Matrix 客户端逻辑（认证、同步、媒体、密钥）
 │   ├── matrix_source.py          # MatrixSourceBackend — 监控所有房间，发送 FORWARD/EDIT/REDACT
-│   └── matrix_target.py          # MatrixTargetBackend — 聚合房间、回复、控制命令
+│   ├── matrix_target.py          # MatrixTargetBackend — 聚合房间、回复、控制命令
+│   └── sso_login.py              # 通过 Playwright 自动化进行 SSO/浏览器登录
 ├── store/                        # 运行时 E2EE 密钥存储（自动创建）
 │   ├── source/                   # 服务器 A 连接的 Olm/Megolm 密钥
 │   └── target/                   # 服务器 B 连接的 Olm/Megolm 密钥
@@ -194,6 +198,8 @@ class BaseBackend(ABC):
 
     # 事件发射
     def on_message(callback)
+    def on_read_receipt(callback)          # 注册已读回执回调
+    def on_new_room(callback)              # 注册新房间检测回调
     async def _emit_message(message)
 ```
 
@@ -228,13 +234,15 @@ class BaseBackend(ABC):
 ```
 _init_client()
     │
-    ├─ 已提供 access_token？ ──► restore_login()
+    ├─ 已提供 access_token？ ──► restore_login()（+ whoami 获取 device_id）
     │
-    └─ 无令牌 ──► 使用密码登录
-                     │
-                     ├─ 服务器分配了 device_id？ ──► _persist_device_id()
-                     │
-                     └─ keys_upload() → keys_query() → _import_keys_if_configured()
+    ├─ 已配置 element_url？ ──► 通过 Playwright 进行 SSO 浏览器登录
+    │
+    └─ 无令牌，无 SSO ──► 使用密码登录
+                          │
+                          ├─ 服务器分配了 device_id？ ──► _persist_device_id()
+                          │
+                          └─ keys_upload() → keys_query() → _import_keys_if_configured()
 ```
 
 #### 待处理加密事件队列
@@ -248,7 +256,7 @@ _init_client()
 5. 当房间密钥到达（`_on_room_key_received`）时，排队的事件被解密并分发
 6. 通过 `StateManager._failed_decryptions` 在重启间持久化
 
-最大队列大小：200 个会话（`MAX_PENDING_SESSIONS`）。
+最大队列大小：1,000 个会话（`MAX_PENDING_SESSIONS`），每个会话最多保留 100 个事件（`MAX_PENDING_EVENTS_PER_SESSION`）。
 
 #### SAS 密钥验证
 
@@ -261,6 +269,26 @@ KeyVerificationMac    ──► 标记为已验证，发送 m.key.verification.d
 ```
 
 同时处理 `m.key.verification.request` to-device 事件，以 `m.key.verification.ready` 响应。
+
+#### 服务器密钥备份恢复
+
+当 `recovery_key` 在 source/target 段中配置时，桥接程序可以从服务器端密钥备份恢复 Megolm 会话密钥（使用 SSSS 派生的备份解密密钥）。此功能在 `bridge/key_backup.py` 中实现，并集成到 `matrix_base.py` 中。
+
+| 组件 | 描述 |
+|------|------|
+| `restore_key_backup()` | 批量从服务器密钥备份恢复所有会话 |
+| `restore_session_from_backup()` | 针对特定会话 ID 的定向单会话恢复 |
+| `_periodic_key_backup_restore()` | `matrix_source.py` 中的后台任务，每 60 秒运行一次（`KEY_BACKUP_RESTORE_INTERVAL`） |
+| `_ensure_backup_key()` | 通过 SSSS 从恢复密钥派生备份解密密钥 |
+| `_fetch_backup_etag()` | 检查备份版本自上次恢复以来是否已更改 |
+
+密钥备份恢复流程：
+1. 解码 `recovery_key`（原始 base64 或基于 AES 的恢复密钥格式）
+2. 从恢复密钥派生 SSSS 密钥（或从口令派生，如果已配置）
+3. 从 SSSS 存储的 `m.megolm_backup.v1` 解密 Curve25519 私有备份密钥
+4. 从 `room_keys/keys` 端点获取加密的会话
+5. 使用备份私钥解密每个会话
+6. 通过 `import_keys()` 将解密的会话导入 matrix-nio 加密存储
 
 ---
 
@@ -389,7 +417,7 @@ KeyVerificationMac    ──► 标记为已验证，发送 m.key.verification.d
 
 #### 未解密事件检测
 
-每次同步后，`_check_undecrypted_events()` 扫描目标房间时间线中无法解密的 `MegolmEvent` 条目。对每个发送通知：`"⛔ Unable to decrypt message from {sender}"`，并将事件排队重试。
+每次同步后，`_check_undecrypted_events()` 扫描目标房间时间线中无法解密的 `MegolmEvent` 条目。对每个记录警告并通过 `_enqueue_pending_encrypted()` 排队重试。不会向目标房间发送通知。
 
 #### 额外方法
 
@@ -517,7 +545,7 @@ class BridgeCore:
 | `source_target_map` | source_event_id → target_event_id | 5,000 |
 | `event_room_map` | target_event_id → source_room_id | 5,000 |
 
-两者都持久化在 `state.json` 中，以 FIFO 方式淘汰。
+两者都持久化在 `messages.db` 的 SQLite 表中，以 FIFO 方式淘汰。
 
 ---
 
@@ -576,7 +604,7 @@ class BridgeCore:
 - `processed_events`：10,000 条（FIFO）
 - `event_room_map`：5,000 条（FIFO）
 - `source_target_map`：5,000 条（FIFO）
-- `failed_decryptions`：所有会话总计 500 条
+- `failed_decryptions`：所有会话总计 2,000 条（`MAX_FAILED_DECRYPTIONS = 2000`，在 `state.py` 中定义）
 
 **写入行为：** 所有写入都是即时的（无需定期刷新）。`flush()` 是为了向后兼容而保留的空操作。
 
@@ -626,6 +654,7 @@ class BridgeCore:
 | `from_self` | BooleanField | 发送者是桥接机器人时为 True |
 | `media_local_path` | CharField | media_dir 内的相对路径 |
 | `edit_of_event_id` | CharField (Indexed) | 引用原始事件 |
+| `reply_to_event_id` | CharField (Indexed) | Matrix reply-to 事件 ID，用于 B→A 回复路由 |
 
 **`bridge_config` 表：** 内部状态的键值存储（例如 `web_secret`、`migrated_aliases_v1`、`sync_token:*`、`forwarding_enabled`、`forwarding_paused`）。
 
@@ -653,7 +682,7 @@ class BridgeCore:
 
 | 特性 | 描述 |
 |------|------|
-| Schema 迁移 | 自动添加 `from_self`、`media_local_path`、`edit_of_event_id` 列（如果缺失） |
+| Schema 迁移 | 自动添加 `from_self`、`media_local_path`、`edit_of_event_id`、`reply_to_event_id` 列（如果缺失） |
 | 别名迁移 | 首次运行时从现有消息填充 `user_aliases` 和 `room_aliases` |
 | 媒体存储 | 将文件保存到 `YYYY-MM/` 子目录，原子写入 |
 | 编辑协调 | `reconcile_edits()` 解析编辑链，应用最新文本，移除编辑存根 |
@@ -686,6 +715,10 @@ class BridgeCore:
 | GET | `/api/history/{room_id}?page=&limit=` | 是 | 分页房间消息历史（升序） |
 | GET | `/api/context/{event_id}?before=&after=` | 是 | 消息及周围 N 条消息的上下文 |
 | GET | `/api/media/{event_id}` | 是 | 从本地存储提供已保存的媒体文件 |
+| POST | `/api/backfill` | 是 | 从源服务器开始历史消息回填 |
+| GET | `/api/backfill/status` | 是 | 获取当前回填进度/状态 |
+| GET | `/api/export?format=json|sqlite` | 是 | 导出所有消息为 JSON 或 SQLite 下载 |
+| POST | `/api/import` | 是 | 从上传的 JSON 或 SQLite 文件导入消息 |
 | GET | `/static/*` | 无 | `bridge/templates/` 中的静态文件 |
 
 #### 认证
@@ -721,7 +754,7 @@ class BridgeCore:
 - 算法：Fernet（AES-128-CBC，带 HMAC-SHA256 认证）
 - 密钥派生：PBKDF2-HMAC-SHA256，600,000 次迭代，16 字节随机盐
 - 加密值以 `enc:` 前缀标识
-- 支持的字段：`access_token`、`password`、`key_import_passphrase`、`web.password`
+- 支持的字段：`access_token`、`password`、`key_import_passphrase`、`recovery_key`（source/target 段）；`password`（bridge.web 段）
 
 **数据库密钥派生：**
 - 算法：PBKDF2-HMAC-SHA256，600,000 次迭代
@@ -783,7 +816,7 @@ class BridgeCore:
 
 **CLI 参数：**
 ```
---rooms       逗号分隔的房间 ID/别名（默认：所有已加入的）
+--rooms       空格分隔的房间 ID/别名（默认：所有已加入的）
 --days N      导入最近 N 天（默认：30）
 --limit N     最大导入消息总数
 --no-media    跳过媒体下载
@@ -1050,12 +1083,14 @@ logging:
   backup_count: integer            # 保留的轮转日志文件数量（默认：3）
 
 source:                            # 连接到服务器 A 的后端
-  type: string                     # "matrix"（未来："telegram" 等）
   homeserver: string               # 必需。例如 "https://matrix-a.example.com"
   user_id: string                  # 必需。完整 MXID
   access_token: string             # 访问令牌或密码（二选一）
   password: string                 # 仅首次运行使用
   device_id: string                # E2EE 必须固定
+  element_url: string              # Element Web URL，用于 SSO 登录（可选）
+  sso_username: string             # SSO/Keycloak 用户名（可选）
+  recovery_key: string             # Element 恢复密钥，用于设备验证和密钥备份恢复（可选）
   store_path: string               # E2EE 加密存储目录
   handle_encrypted: boolean        # 默认：true
   media_max_size: integer          # 最大媒体下载大小（字节，默认：50MB）
@@ -1063,7 +1098,6 @@ source:                            # 连接到服务器 A 的后端
   key_import_passphrase: string    # 密钥导出文件的口令
 
 target:                            # 连接到服务器 B 的后端（省略则为备份模式）
-  type: string
   homeserver: string
   user_id: string
   access_token: string
@@ -1108,6 +1142,7 @@ bridge:
 | `aiohttp` | >= 3.9.0 | Web 搜索界面的 HTTP 服务器 |
 | `peewee` | >= 3.17.0 | 消息持久化的 SQLite ORM |
 | `pysqlcipher3` | >= 1.2.0 | SQLCipher 绑定，用于数据库加密 |
+| `playwright` | >= 1.40.0 | SSO 登录的浏览器自动化（element_url 认证） |
 
 ### E2EE 的 matrix-nio 子依赖
 

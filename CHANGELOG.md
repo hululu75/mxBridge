@@ -6,7 +6,7 @@ All notable changes to the Matrix Bridge project are documented in this file.
 
 ### Added
 
-- **Encrypted database** — messages.db is now encrypted with SQLCipher using a key derived from the master password via PBKDF2-HMAC-SHA512
+- **Encrypted database** — messages.db is now encrypted with SQLCipher using a key derived from the master password via PBKDF2-HMAC-SHA256
   - Salt stored in `messages.db.salt` (auto-generated, 16 bytes)
   - Automatic migration of existing plaintext databases (backup kept at `messages.db.plaintext.bak`)
   - `_EncryptedSqliteDatabase` Peewee backend wrapping `pysqlcipher3`

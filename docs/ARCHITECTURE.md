@@ -21,10 +21,10 @@
                                        │
                         ┌──────────────┼──────────────┐
                         │              │              │
-                 ┌──────┴──────┐ ┌─────┴──────┐ ┌─────┴──────┐
-                 │ State Store │ │ Message    │ │ Web Server │
-                 │ state.json  │ │ Store      │ │ (aiohttp)  │
-                 └─────────────┘ │ SQLite DB  │ └────────────┘
+                  ┌──────┴──────┐ ┌─────┴──────┐ ┌─────┴──────┐
+                  │ State Store │ │ Message    │ │ Web Server │
+                  │ SQLite DB   │ │ Store      │ │ (aiohttp)  │
+                  └─────────────┘ │ SQLite DB  │ └────────────┘
                                  └────────────┘
 ```
 
@@ -60,7 +60,7 @@ All persistent state (sync tokens, event mappings, processed events, failed decr
 ## 2. Project Structure
 
 ```
-matrix/
+mxBridge/
 ├── main.py                       # Entry point: config loading, encryption, signal handling, startup
 ├── config.example.yaml           # Configuration template
 ├── requirements.txt              # Python dependencies
@@ -75,7 +75,9 @@ matrix/
 ├── scripts/
 │   ├── backfill.py               # CLI: import historical messages into MessageStore
 │   ├── repair_media.py           # CLI: repair corrupted encrypted media files
-│   └── encrypt_tool.py           # CLI: encrypt/decrypt config values
+│   ├── encrypt_tool.py           # CLI: encrypt/decrypt config values
+│   └── diagnose_decrypt.py       # CLI: diagnose E2EE decryption issues
+├── tests/                        # Test suite
 ├── bridge/
 │   ├── __init__.py
 │   ├── models.py                 # BridgeMessage dataclass — unified cross-backend message model
@@ -84,6 +86,7 @@ matrix/
 │   ├── message_store.py          # MessageStore — SQLCipher-encrypted SQLite with FTS5 + state tables
 │   ├── web.py                    # WebServer — aiohttp HTTP API for message search and browsing
 │   ├── crypto.py                 # Config field encryption/decryption (Fernet + PBKDF2) + DB key derivation
+│   ├── key_backup.py             # Server-side key backup restore (recovery_key based)
 │   └── templates/
 │       ├── index.html            # Web UI single-page application
 │       └── marked.min.js         # Markdown rendering library for web UI
@@ -92,7 +95,8 @@ matrix/
 │   ├── base.py                   # BaseBackend — abstract interface for all protocol adapters
 │   ├── matrix_base.py            # MatrixBackend — shared Matrix client logic (auth, sync, media, keys)
 │   ├── matrix_source.py          # MatrixSourceBackend — monitors all rooms, emits FORWARD/EDIT/REDACT
-│   └── matrix_target.py          # MatrixTargetBackend — aggregation room, reply-to, control commands
+│   ├── matrix_target.py          # MatrixTargetBackend — aggregation room, reply-to, control commands
+│   └── sso_login.py              # SSO/browser login via Playwright automation
 ├── store/                        # Runtime E2EE key storage (auto-created)
 │   ├── source/                   # Olm/Megolm keys for Server A connection
 │   └── target/                   # Olm/Megolm keys for Server B connection
@@ -196,6 +200,8 @@ class BaseBackend(ABC):
 
     # Event emission
     def on_message(callback)
+    def on_read_receipt(callback)          # Register read receipt callback
+    def on_new_room(callback)              # Register new room detected callback
     async def _emit_message(message)
 ```
 
@@ -230,13 +236,15 @@ class BaseBackend(ABC):
 ```
 _init_client()
     │
-    ├─ access_token provided? ──► restore_login()
+    ├─ access_token provided? ──► restore_login() (+ whoami for device_id)
     │
-    └─ No token ──► Login with password
-                     │
-                     ├─ Server assigns device_id? ──► _persist_device_id()
-                     │
-                     └─ keys_upload() → keys_query() → _import_keys_if_configured()
+    ├─ element_url configured? ──► SSO browser login via Playwright
+    │
+    └─ No token, no SSO ──► Login with password
+                             │
+                             ├─ Server assigns device_id? ──► _persist_device_id()
+                             │
+                             └─ keys_upload() → keys_query() → _import_keys_if_configured()
 ```
 
 #### Pending Encrypted Event Queue
@@ -250,7 +258,7 @@ When a Megolm event cannot be decrypted (missing session key), the event is queu
 5. When a room key arrives (`_on_room_key_received`), queued events are decrypted and dispatched
 6. Persisted across restarts via `StateManager._failed_decryptions`
 
-Maximum queue size: 200 sessions (`MAX_PENDING_SESSIONS`).
+Maximum queue size: 1,000 sessions (`MAX_PENDING_SESSIONS`), with at most 100 events per session (`MAX_PENDING_EVENTS_PER_SESSION`).
 
 #### SAS Key Verification
 
@@ -263,6 +271,26 @@ KeyVerificationMac    ──► Mark as verified, send m.key.verification.done
 ```
 
 Also handles `m.key.verification.request` to-device events by responding with `m.key.verification.ready`.
+
+#### Server Key Backup Restore
+
+When `recovery_key` is configured in the source/target section, the bridge can restore Megolm session keys from the server-side key backup (using the SSSS-derived backup decryption key). This is implemented in `bridge/key_backup.py` and integrated into `matrix_base.py`.
+
+| Component | Description |
+|-----------|-------------|
+| `restore_key_backup()` | Bulk restore all sessions from server key backup |
+| `restore_session_from_backup()` | Targeted single-session restore for a specific session ID |
+| `_periodic_key_backup_restore()` | Background task in `matrix_source.py`, runs every 60 seconds (`KEY_BACKUP_RESTORE_INTERVAL`) |
+| `_ensure_backup_key()` | Derive the backup decryption key from the recovery key via SSSS |
+| `_fetch_backup_etag()` | Check if backup version has changed since last restore |
+
+The key backup restore flow:
+1. Decode the `recovery_key` (either raw base64 or AES-based recovery key format)
+2. Derive the SSSS key from the recovery key (or from a passphrase if configured)
+3. Decrypt the Curve25519 private backup key from SSSS-stored `m.megolm_backup.v1`
+4. Fetch encrypted sessions from `room_keys/keys` endpoint
+5. Decrypt each session using the backup private key
+6. Import decrypted sessions into the matrix-nio crypto store via `import_keys()`
 
 ---
 
@@ -391,7 +419,7 @@ Detected as exact string match on the stripped message body.
 
 #### Undecrypted Event Detection
 
-After each sync, `_check_undecrypted_events()` scans for `MegolmEvent` entries in the target room timeline that could not be decrypted. For each, it sends a notice: `"⛔ Unable to decrypt message from {sender}"` and queues the event for retry.
+After each sync, `_check_undecrypted_events()` scans for `MegolmEvent` entries in the target room timeline that could not be decrypted. For each, it logs a warning and queues the event for retry via `_enqueue_pending_encrypted()`. No notice is sent to the target room.
 
 #### Extra Methods
 
@@ -519,7 +547,7 @@ Two bidirectional maps are maintained for edit/redaction/reply resolution:
 | `source_target_map` | source_event_id → target_event_id | 5,000 |
 | `event_room_map` | target_event_id → source_room_id | 5,000 |
 
-Both are persisted in `state.json` and evicted on FIFO basis.
+Both are persisted in SQLite tables within `messages.db` and evicted on FIFO basis.
 
 ---
 
@@ -578,7 +606,7 @@ On startup, `StateManager.load()` checks for `state.json`:
 - `processed_events`: 10,000 entries (FIFO)
 - `event_room_map`: 5,000 entries (FIFO)
 - `source_target_map`: 5,000 entries (FIFO)
-- `failed_decryptions`: 500 total entries across all sessions
+- `failed_decryptions`: 2,000 total entries across all sessions (`MAX_FAILED_DECRYPTIONS = 2000` in `state.py`)
 
 **Write behavior:** All writes are immediate (no periodic flush needed). `flush()` is a no-op kept for backward compatibility.
 
@@ -628,6 +656,7 @@ If `db_password` is not provided to `MessageStore`, a plain unencrypted SQLite d
 | `from_self` | BooleanField | True if sender is the bridge bot |
 | `media_local_path` | CharField | Relative path within media_dir |
 | `edit_of_event_id` | CharField (Indexed) | References the original event |
+| `reply_to_event_id` | CharField (Indexed) | Matrix reply-to event ID for B→A reply routing |
 
 **`bridge_config` table:** Key-value store for internal state (e.g., `web_secret`, `migrated_aliases_v1`, `sync_token:*`, `forwarding_enabled`, `forwarding_paused`).
 
@@ -655,7 +684,7 @@ If `db_password` is not provided to `MessageStore`, a plain unencrypted SQLite d
 
 | Feature | Description |
 |---------|-------------|
-| Schema migration | Automatically adds `from_self`, `media_local_path`, `edit_of_event_id` columns if missing |
+| Schema migration | Automatically adds `from_self`, `media_local_path`, `edit_of_event_id`, `reply_to_event_id` columns if missing |
 | Alias migration | Populates `user_aliases` and `room_aliases` from existing messages on first run |
 | Media storage | Saves files to `YYYY-MM/` subdirectories with atomic writes |
 | Edit reconciliation | `reconcile_edits()` resolves edit chains, applies latest text, removes edit stubs |
@@ -688,6 +717,10 @@ An aiohttp-based HTTP server providing a searchable web interface for the messag
 | GET | `/api/history/{room_id}?page=&limit=` | Yes | Paginated room message history (ascending) |
 | GET | `/api/context/{event_id}?before=&after=` | Yes | Message with N surrounding messages for context |
 | GET | `/api/media/{event_id}` | Yes | Serves a saved media file from local storage |
+| POST | `/api/backfill` | Yes | Start historical message backfill from source server |
+| GET | `/api/backfill/status` | Yes | Get current backfill progress/status |
+| GET | `/api/export?format=json|sqlite` | Yes | Export all messages as JSON or SQLite download |
+| POST | `/api/import` | Yes | Import messages from uploaded JSON or SQLite file |
 | GET | `/static/*` | No | Static files from `bridge/templates/` |
 
 #### Authentication
@@ -723,7 +756,7 @@ Symmetric encryption for sensitive config values (access tokens, passwords, key 
 - Algorithm: Fernet (AES-128-CBC with HMAC-SHA256 for authentication)
 - Key derivation: PBKDF2-HMAC-SHA256, 600,000 iterations, 16-byte random salt
 - Encrypted values prefixed with `enc:` for easy identification
-- Supported fields: `access_token`, `password`, `key_import_passphrase`, `web.password`
+- Supported fields: `access_token`, `password`, `key_import_passphrase`, `recovery_key` (source/target sections); `password` (bridge.web section)
 
 **Database key derivation:**
 - Algorithm: PBKDF2-HMAC-SHA256, 600,000 iterations
@@ -785,7 +818,7 @@ Connects to the source Matrix server and bulk-imports historical room messages i
 
 **CLI flags:**
 ```
---rooms       Comma-separated room IDs/aliases (default: all joined)
+--rooms       Space-separated room IDs/aliases (default: all joined)
 --days N      Import last N days (default: 30)
 --limit N     Max total messages to import
 --no-media    Skip media downloads
@@ -1052,12 +1085,14 @@ logging:
   backup_count: integer            # Number of rotated log files to keep (default: 3)
 
 source:                            # Backend connecting to Server A
-  type: string                     # "matrix" (future: "telegram", etc.)
   homeserver: string               # Required. e.g. "https://matrix-a.example.com"
   user_id: string                  # Required. Full MXID
   access_token: string             # Access token or password required
   password: string                 # Used only on first run
   device_id: string                # Must be fixed for E2EE
+  element_url: string              # Element web URL for SSO login (optional)
+  sso_username: string             # SSO/Keycloak username (optional)
+  recovery_key: string             # Element recovery key for device verification and key backup restore (optional)
   store_path: string               # E2EE crypto store directory
   handle_encrypted: boolean        # default: true
   media_max_size: integer          # Max media download size in bytes (default: 50MB)
@@ -1065,7 +1100,6 @@ source:                            # Backend connecting to Server A
   key_import_passphrase: string    # Passphrase for the key export file
 
 target:                            # Backend connecting to Server B (omit for backup mode)
-  type: string
   homeserver: string
   user_id: string
   access_token: string
@@ -1110,6 +1144,7 @@ bridge:
 | `aiohttp` | >= 3.9.0 | HTTP server for web search interface |
 | `peewee` | >= 3.17.0 | SQLite ORM for message persistence |
 | `pysqlcipher3` | >= 1.2.0 | SQLCipher binding for encrypted database |
+| `playwright` | >= 1.40.0 | Browser automation for SSO login (element_url authentication) |
 
 ### matrix-nio sub-dependencies for E2EE
 

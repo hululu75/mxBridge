@@ -192,6 +192,9 @@ python3 main.py
 | `source.media_max_size` | 否 | 最大媒体文件大小（字节，默认：50 MB） |
 | `source.key_import_file` | 否 | E2EE 密钥导出文件路径（例如从 Element 导出） |
 | `source.key_import_passphrase` | 否 | 密钥导出文件的口令 |
+| `source.element_url` | 否 | Element Web URL，用于 SSO 登录（例如 `https://element.example.com`） |
+| `source.sso_username` | 否 | SSO/Keycloak 用户名（用于 SSO 登录） |
+| `source.recovery_key` | 否 | Element 恢复密钥，用于设备验证和密钥备份恢复 |
 | `target.homeserver` | 是** | 服务器 B 的基础 URL |
 | `target.user_id` | 是** | B 上桥接账户的完整用户 ID |
 | `target.access_token` | 是** | 服务器 B 的访问令牌 |
@@ -384,7 +387,7 @@ location / {
 python3 scripts/backfill.py
 
 # 导入指定房间，最近 7 天
-python3 scripts/backfill.py --rooms "#general:a.com,!abc:a.com" --days 7
+python3 scripts/backfill.py --rooms "#general:a.com" "!abc:a.com" --days 7
 
 # 模拟运行（显示将要导入的内容）
 python3 scripts/backfill.py --dry-run
@@ -411,6 +414,18 @@ python3 scripts/repair_media.py --dry-run
 ```bash
 python3 scripts/encrypt_tool.py encrypt    # 加密一个值
 python3 scripts/encrypt_tool.py decrypt    # 解密一个值
+```
+
+### Diagnose decrypt — 诊断 E2EE 解密问题
+
+```bash
+# 诊断房间中加密事件无法解密的原因
+MXBRIDGE_MASTER_KEY=... python scripts/diagnose_decrypt.py \
+    --config config.yaml --room '!roomid:server' [--limit 50]
+
+# 诊断特定事件
+MXBRIDGE_MASTER_KEY=... python scripts/diagnose_decrypt.py \
+    --config config.yaml --room '!roomid:server' --event '$eventid'
 ```
 
 ## 密钥导入
@@ -464,8 +479,7 @@ logging:
 
 ### 重启后消息重复
 
-- 状态现在持久化在 SQLite 数据库中（以前是 `state.json`）。如果数据库被删除，桥接将重新处理旧消息。
-- 升级后首次运行时，`state.json` 会自动迁移到数据库并删除。
+- 状态现在持久化在 SQLite 数据库中。如果数据库被删除，桥接将重新处理旧消息。
 
 ### 数据库从明文迁移到加密
 
